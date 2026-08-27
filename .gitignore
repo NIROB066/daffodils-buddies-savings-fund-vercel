@@ -38,6 +38,7 @@ Sample Data/
 *.xlsx
 *.xls
 ~$*
+*.txt
 
 # ---- user-uploaded content ----
 # Keep the folder, ignore everything users put in it.

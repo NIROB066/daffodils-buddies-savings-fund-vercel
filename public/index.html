@@ -148,18 +148,38 @@
 
           <!-- Chat -->
           <div class="pane active" id="pane-chat">
+            <div class="chat-tools">
+              <div class="chat-search">
+                <span class="cs-ic" data-ico="search"></span>
+                <input type="search" id="chat-search-input" placeholder="Search messages…" autocomplete="off" />
+                <span class="cs-count" id="chat-search-count" hidden></span>
+                <button class="cs-nav" id="chat-search-prev" title="Older match" hidden>&#8593;</button>
+                <button class="cs-nav" id="chat-search-next" title="Newer match" hidden>&#8595;</button>
+                <button class="cs-nav" id="chat-search-clear" title="Clear search" hidden data-ico="x"></button>
+              </div>
+              <button class="chat-tool" id="chat-expand" title="Full-screen chat" data-ico="expand"></button>
+            </div>
             <div class="chat-body" id="chat-box"></div>
+            <button class="jump-btn" id="chat-jump" title="Jump to latest" hidden>
+              <span data-ico="down"></span><span class="jb-count" id="chat-jump-count" hidden>0</span>
+            </button>
+            <div class="typing-row" id="typing-row" hidden></div>
             <div class="reply-banner" id="reply-banner">
               <span id="reply-text"></span><span class="x" id="reply-cancel" data-ico="x"></span>
+            </div>
+            <div class="reply-banner edit" id="edit-banner">
+              <span>Editing your message</span><span class="x" id="edit-cancel" data-ico="x"></span>
             </div>
             <div class="chat-attach" id="chat-attach"></div>
             <div class="chat-compose">
               <div class="mention-pop" id="mention-pop"></div>
+              <div class="emoji-pop" id="emoji-pop"></div>
               <div class="attach-row">
                 <button class="attach-btn" id="attach-photo" title="Send a photo" data-ico="camera"></button>
                 <button class="attach-btn" id="attach-audio" title="Record a voice message" data-ico="mic"></button>
                 <button class="attach-btn" id="attach-video" title="Record a video" data-ico="video"></button>
                 <button class="attach-btn" id="attach-file" title="Attach a file" data-ico="clip"></button>
+                <button class="attach-btn" id="emoji-btn" title="Emoji" data-ico="smile"></button>
                 <button class="attach-btn" id="mention-btn" title="Mention a buddy" data-ico="at"></button>
               </div>
               <textarea id="chat-text" placeholder="Message the buddies... use @ to mention"></textarea>
@@ -207,9 +227,26 @@
   <div class="chat-dock" id="chat-dock" hidden>
     <div class="dock-head">
       <span class="dh-title"><span class="live-dot on"></span> Buddies chat</span>
-      <button class="dock-close" id="dock-close" title="Minimize" data-ico="chevron"></button>
+      <span class="dh-actions">
+        <button class="dock-close" id="dock-full" title="Full screen" data-ico="expand"></button>
+        <button class="dock-close" id="dock-close" title="Minimize" data-ico="chevron"></button>
+      </span>
     </div>
     <div class="dock-body" id="dock-body"></div>
+  </div>
+
+  <!-- Tap a message (or long-press on a phone) to react / reply / copy / edit / delete -->
+  <div class="msg-menu-scrim" id="msg-menu-scrim" hidden></div>
+  <div class="msg-menu" id="msg-menu" hidden>
+    <div class="mm-reacts" id="mm-reacts"></div>
+    <div class="mm-actions" id="mm-actions"></div>
+  </div>
+
+  <!-- Full-screen viewer for chat photos -->
+  <div class="lightbox" id="lightbox" hidden>
+    <button class="lb-close" id="lb-close" title="Close" data-ico="x"></button>
+    <img id="lb-img" alt="" />
+    <div class="lb-bar"><span id="lb-cap"></span><a class="btn small" id="lb-dl" href="#">Download</a></div>
   </div>
 
   <div class="toast" id="toast"></div>

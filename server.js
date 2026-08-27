@@ -65,7 +65,12 @@ const COLS = {
   loans: ['id', 'member', 'amount', 'date', 'purpose', 'status', 'due_date'],
   donations: ['id', 'organization', 'amount', 'date', 'link', 'type'],
   posts: ['id', 'member', 'text', 'image', 'timestamp'],
-  chat: ['id', 'member', 'text', 'media', 'media_type', 'media_name', 'media_size', 'reply_to', 'timestamp'],
+  // `reactions` packs emoji → who reacted as "👍:Nirob|Yen;❤️:Riyad" (one CSV cell).
+  // `deleted` is a tombstone: the row stays so replies still make sense, the content goes.
+  chat: ['id', 'member', 'text', 'media', 'media_type', 'media_name', 'media_size', 'reply_to',
+    'timestamp', 'reactions', 'deleted', 'edited_at'],
+  // Read receipts: how far each buddy has read. Typing is in memory — it's ephemeral.
+  chat_state: ['email', 'name', 'last_seen', 'updated'],
   photos: ['id', 'member', 'filename', 'caption', 'timestamp'],
   overrides: ['rule_key', 'final_value'],
   push_subs: ['email', 'name', 'endpoint', 'p256dh', 'auth', 'created'],
@@ -88,12 +93,23 @@ function migrateLogin() {
 }
 if (!googleStorage.configured()) migrateLogin();
 
+/**
+ * Widen chat rows that pre-date reactions / deletes / edits. Rewriting with the current
+ * column list is enough: missing values become empty strings and the header gains the
+ * new names, which is what keeps `appendCsv` (and the Google Sheets tab) aligned.
+ */
+function migrateChat() {
+  const rows = readCsv(file('chat'));
+  if (rows.length && 'reactions' in rows[0] && 'edited_at' in rows[0]) return;
+  writeCsv(file('chat'), rows, COLS.chat);
+}
+
 const storageReady = googleStorage.configured()
-  ? initGoogleStorage(COLS).catch((error) => {
+  ? initGoogleStorage(COLS).then(migrateChat).catch((error) => {
     console.error('Google storage initialization failed:', error.message);
     throw error;
   })
-  : Promise.resolve();
+  : Promise.resolve(migrateChat());
 
 app.use('/api', async (_req, res, next) => {
   try {
@@ -155,7 +171,10 @@ function publicUser(u) {
 }
 
 const linkPreviewCache = new Map();
-const LINK_PREVIEW_TTL = 10 * 60 * 1000;
+const LINK_PREVIEW_TTL = 60 * 60 * 1000;
+// A failure is usually transient (timeout, rate limit). Cache it only briefly so the
+// next render gets another go instead of showing a bare hostname for the next hour.
+const LINK_PREVIEW_FAIL_TTL = 60 * 1000;
 
 function isPrivateAddress(address) {
   return address === '::1' || address === 'localhost'
@@ -196,30 +215,41 @@ app.get('/api/link-preview', async (req, res) => {
   if (!target) return res.status(400).json({ error: 'Only public http(s) URLs are supported.' });
   const key = target.href;
   const cached = linkPreviewCache.get(key);
-  if (cached && Date.now() - cached.time < LINK_PREVIEW_TTL) return res.json(cached.data);
+  if (cached && Date.now() - cached.time < cached.ttl) return res.json(cached.data);
 
   try {
     const response = await fetch(key, {
-      headers: { 'user-agent': 'DaffodilsLinkPreview/1.0' },
-      redirect: 'follow', signal: AbortSignal.timeout(5000),
+      // Plenty of sites serve og: tags only to something that looks like a real browser,
+      // and refuse or strip them for an unknown agent — hence the full header set.
+      headers: {
+        'user-agent': 'Mozilla/5.0 (compatible; DaffodilsBot/1.0; +https://daffodils.buddies) '
+          + 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+      },
+      redirect: 'follow', signal: AbortSignal.timeout(8000),
     });
-    if (!response.ok || !(response.headers.get('content-type') || '').includes('text/html')) throw new Error('Not HTML');
+    const type = (response.headers.get('content-type') || '').toLowerCase();
+    if (!response.ok || !/text\/html|application\/xhtml/.test(type)) throw new Error('Not HTML');
     const length = Number(response.headers.get('content-length') || 0);
-    if (length > 1024 * 1024) throw new Error('Response too large');
-    const html = (await response.text()).slice(0, 1024 * 1024);
+    if (length > 2 * 1024 * 1024) throw new Error('Response too large');
+    // Only the <head> can hold the metadata, so stop reading once we've passed it.
+    const html = (await response.text()).slice(0, 512 * 1024);
     const data = {
       url: key,
       title: decodeHtml(metaContent(html, 'og:title') || metaContent(html, 'twitter:title') || html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] || target.hostname),
-      description: decodeHtml(metaContent(html, 'og:description') || metaContent(html, 'twitter:description')),
-      image: metaContent(html, 'og:image') || metaContent(html, 'twitter:image'),
+      description: decodeHtml(metaContent(html, 'og:description') || metaContent(html, 'twitter:description') || metaContent(html, 'description')),
+      image: metaContent(html, 'og:image') || metaContent(html, 'og:image:url') || metaContent(html, 'twitter:image'),
       site: decodeHtml(metaContent(html, 'og:site_name') || target.hostname),
     };
-    if (data.image) data.image = new URL(data.image, response.url || key).href;
-    linkPreviewCache.set(key, { time: Date.now(), data });
+    if (data.image) {
+      try { data.image = new URL(decodeHtml(data.image), response.url || key).href; } catch { data.image = ''; }
+    }
+    linkPreviewCache.set(key, { time: Date.now(), ttl: LINK_PREVIEW_TTL, data });
     res.json(data);
   } catch {
-    const data = { url: key, title: target.hostname, description: '', image: '', site: target.hostname };
-    linkPreviewCache.set(key, { time: Date.now(), data });
+    const data = { url: key, title: target.hostname, description: '', image: '', site: target.hostname, partial: true };
+    linkPreviewCache.set(key, { time: Date.now(), ttl: LINK_PREVIEW_FAIL_TTL, data });
     res.json(data);
   }
 });
@@ -308,14 +338,135 @@ app.post('/api/posts', (req, res) => {
   res.json(post);
 });
 
+/* ---- chat message shaping ------------------------------------------------
+   Reactions live in one CSV cell: "👍:Nirob|Yen;❤️:Riyad". Names never contain
+   ; : or | so the encoding round-trips without escaping. */
+function parseReactions(value) {
+  const out = {};
+  for (const part of String(value || '').split(';')) {
+    if (!part) continue;
+    const cut = part.indexOf(':');
+    if (cut < 1) continue;
+    const names = part.slice(cut + 1).split('|').filter(Boolean);
+    if (names.length) out[part.slice(0, cut)] = names;
+  }
+  return out;
+}
+
+function encodeReactions(map) {
+  return Object.entries(map)
+    .filter(([, names]) => names.length)
+    .map(([emoji, names]) => `${emoji}:${names.join('|')}`)
+    .join(';');
+}
+
+/** What the client is allowed to see: a deleted message keeps only its skeleton. */
+function shapeMessage(row) {
+  const base = { ...row, reactions: parseReactions(row.reactions) };
+  if (String(row.deleted) !== '1') return base;
+  return {
+    ...base, text: '', media: '', media_type: '', media_name: '', media_size: '',
+    reactions: {}, deleted: '1',
+  };
+}
+
+const sortedChat = () => pruneChat().sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+
+/**
+ * A cheap fingerprint of everything that can change *in place* (reactions, deletes,
+ * edits). `?since=<id>` can't carry those, so the poll sends the fingerprint back and we
+ * hand over the whole thread whenever it no longer matches. Derived from the data rather
+ * than a counter, so it survives a restart or a second serverless instance.
+ */
+function chatRevision(rows) {
+  let hash = 0;
+  for (const r of rows) {
+    const s = `${r.id}~${r.reactions || ''}~${r.deleted || ''}~${r.edited_at || ''}`;
+    for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) | 0;
+  }
+  return String(hash >>> 0);
+}
+
 /**
  * Chat history, oldest first. `?since=<id>` returns only messages newer than that id,
  * which is what the client's live-poll uses so it doesn't re-download the whole thread.
  */
 app.get('/api/chat', (req, res) => {
-  const all = pruneChat().sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+  const all = sortedChat().map(shapeMessage);
   const since = parseInt(req.query.since, 10);
   res.json(isNaN(since) ? all : all.filter((m) => (parseInt(m.id, 10) || 0) > since));
+});
+
+/* ---- presence: who's typing, who has read how far ---------------------- */
+
+// Typing is deliberately in-memory: it expires in seconds, so persisting it would cost
+// a write per keystroke and buy nothing.
+const typingNow = new Map();          // email → { name, at }
+const TYPING_TTL = 6000;
+
+function typingNames(exceptEmail) {
+  const now = Date.now();
+  const names = [];
+  for (const [email, entry] of typingNow) {
+    if (now - entry.at > TYPING_TTL) { typingNow.delete(email); continue; }
+    if (email !== exceptEmail) names.push(entry.name);
+  }
+  return names;
+}
+
+/** { name: highest message id that person has read } */
+function readReceipts() {
+  const out = {};
+  for (const row of readCsv(file('chat_state'))) {
+    if (row.name) out[row.name] = parseInt(row.last_seen, 10) || 0;
+  }
+  return out;
+}
+
+app.post('/api/chat/typing', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  typingNow.set(user.email, { name: user.name, at: Date.now() });
+  res.json({ ok: true });
+});
+
+app.post('/api/chat/seen', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  const id = parseInt((req.body || {}).id, 10) || 0;
+  const rows = readCsv(file('chat_state'));
+  const mine = rows.find((r) => String(r.email).toLowerCase() === user.email.toLowerCase());
+  // Only write when the marker actually moves — this runs on every visit to the chat.
+  if (mine && (parseInt(mine.last_seen, 10) || 0) >= id) return res.json({ ok: true });
+  const updated = new Date().toISOString();
+  if (mine) {
+    Object.assign(mine, { name: user.name, last_seen: String(id), updated });
+    writeCsv(file('chat_state'), rows, COLS.chat_state);
+  } else {
+    appendCsv(file('chat_state'), { email: user.email, name: user.name, last_seen: String(id), updated }, COLS.chat_state);
+  }
+  res.json({ ok: true });
+});
+
+/**
+ * One round-trip for the live poll: new messages, plus the presence bits, plus the
+ * revision. If the caller's revision is stale we return `full` instead of `messages` so
+ * edits/deletes/reactions on older messages are picked up too.
+ */
+app.get('/api/chat/live', (req, res) => {
+  const user = currentUser(req);
+  const rows = sortedChat();
+  const rev = chatRevision(rows);
+  const since = parseInt(req.query.since, 10);
+  const stale = String(req.query.rev || '') !== rev;
+  const all = rows.map(shapeMessage);
+  res.json({
+    rev,
+    full: stale ? all : null,
+    messages: stale || isNaN(since) ? [] : all.filter((m) => (parseInt(m.id, 10) || 0) > since),
+    typing: typingNames(user ? user.email : ''),
+    receipts: readReceipts(),
+  });
 });
 
 /** One-line preview of a message — mirrors describe() in public/js/chatlive.js. */
@@ -356,10 +507,79 @@ app.post('/api/chat', (req, res) => {
     id: nextId(rows), member: user.name, text,
     media: '', media_type: '', media_name: '', media_size: '',
     reply_to: reply_to || '', timestamp: new Date().toISOString(),
+    reactions: '', deleted: '', edited_at: '',
   };
   appendCsv(file('chat'), msg, COLS.chat);
-  res.json(msg);
+  typingNow.delete(user.email);
+  res.json(shapeMessage(msg));
   pushChat(user, msg);
+});
+
+/** Find a message by id, or answer 404. Returns `[rows, message]` when it exists. */
+function locateMessage(req, res) {
+  const rows = pruneChat();
+  const msg = rows.find((r) => String(r.id) === String(req.params.id));
+  if (!msg) { res.status(404).json({ error: 'Message not found.' }); return []; }
+  return [rows, msg];
+}
+
+/**
+ * Delete your own message (the admin can delete anyone's). The row survives as a
+ * tombstone so replies pointing at it still render — only the content goes, along with
+ * any uploaded file.
+ */
+app.delete('/api/chat/:id', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  const [rows, msg] = locateMessage(req, res);
+  if (!msg) return;
+  if (msg.member !== user.name && String(user.is_admin) !== '1') {
+    return res.status(403).json({ error: 'You can only delete your own messages.' });
+  }
+  if (msg.media) unlinkFiles([msg], (r) => r.media);
+  Object.assign(msg, {
+    text: '', media: '', media_type: '', media_name: '', media_size: '',
+    reactions: '', deleted: '1',
+  });
+  writeCsv(file('chat'), rows, COLS.chat);
+  res.json(shapeMessage(msg));
+});
+
+/** Edit your own text message. Media captions count as text too. */
+app.patch('/api/chat/:id', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  const text = String((req.body || {}).text || '').trim();
+  if (!text) return res.status(400).json({ error: 'Message is empty.' });
+  const [rows, msg] = locateMessage(req, res);
+  if (!msg) return;
+  if (msg.member !== user.name) return res.status(403).json({ error: 'You can only edit your own messages.' });
+  if (String(msg.deleted) === '1') return res.status(400).json({ error: 'That message was deleted.' });
+  msg.text = text;
+  msg.edited_at = new Date().toISOString();
+  writeCsv(file('chat'), rows, COLS.chat);
+  res.json(shapeMessage(msg));
+});
+
+// One emoji per person per message: sending the same one again takes it back.
+const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉'];
+
+app.post('/api/chat/:id/react', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  const emoji = String((req.body || {}).emoji || '');
+  if (!REACTIONS.includes(emoji)) return res.status(400).json({ error: 'Unknown reaction.' });
+  const [rows, msg] = locateMessage(req, res);
+  if (!msg) return;
+  if (String(msg.deleted) === '1') return res.status(400).json({ error: 'That message was deleted.' });
+
+  const map = parseReactions(msg.reactions);
+  const had = (map[emoji] || []).includes(user.name);
+  for (const key of Object.keys(map)) map[key] = map[key].filter((n) => n !== user.name);
+  if (!had) map[emoji] = [...(map[emoji] || []), user.name];
+  msg.reactions = encodeReactions(map);
+  writeCsv(file('chat'), rows, COLS.chat);
+  res.json(shapeMessage(msg));
 });
 
 // ---- push notification routes -------------------------------------------
@@ -454,9 +674,11 @@ app.post('/api/chat/media', chatMedia.single('media'), uploadToBlob, (req, res) 
     media_name: req.file.originalname || req.file.filename,
     media_size: req.file.size || '',
     reply_to: (req.body && req.body.reply_to) || '', timestamp: new Date().toISOString(),
+    reactions: '', deleted: '', edited_at: '',
   };
   appendCsv(file('chat'), msg, COLS.chat);
-  res.json(msg);
+  typingNow.delete(user.email);
+  res.json(shapeMessage(msg));
   pushChat(user, msg);
 });
 
@@ -556,7 +778,12 @@ function clearCollection(name, cols, pick) {
     res.json({ ok: true, cleared: rows.length });
   };
 }
-app.delete('/api/admin/chat', requireAdmin, clearCollection('chat', COLS.chat, (r) => r.media));
+app.delete('/api/admin/chat', requireAdmin, (req, res, next) => {
+  // Read markers point at message ids that are about to stop existing.
+  writeCsv(file('chat_state'), [], COLS.chat_state);
+  typingNow.clear();
+  next();
+}, clearCollection('chat', COLS.chat, (r) => r.media));
 app.delete('/api/admin/posts', requireAdmin, clearCollection('posts', COLS.posts, (r) => r.image));
 app.delete('/api/admin/photos', requireAdmin, clearCollection('photos', COLS.photos, (r) => r.filename));
 

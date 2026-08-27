@@ -8,12 +8,15 @@
 const ChatLive = (function () {
   const SEEN_KEY = 'daf_chat_seen';
   const HINT_KEY = 'daf_ios_hint';
+  const FULL_KEY = 'daf_chat_full';
   const POLL_ACTIVE = 5000;    // tab in the foreground
   const POLL_IDLE = 20000;     // tab hidden — be gentle on the free-tier host
 
   let unread = 0, timer = null, swReg = null, dockOpen = false;
   let pushOn = false;                       // server can reach this device while it's closed
   let homeParent = null, homeNext = null;   // where #pane-chat lives when docked away
+  let rev = '';                             // server's chat fingerprint, see /api/chat/live
+  let reported = 0;                         // highest id we've told the server we've read
 
   const me = () => (Session.user && Session.user.name) || '';
   const seenId = () => parseInt(localStorage.getItem(SEEN_KEY) || '0', 10) || 0;
@@ -52,6 +55,11 @@ const ChatLive = (function () {
     const last = Community.lastId();
     if (last) setSeen(last);
     setUnread(0);
+    // Let the others' ✓✓ catch up. Only when the marker actually moves.
+    if (last > reported) {
+      reported = last;
+      api('/chat/seen', { method: 'POST', body: { id: last } }).catch(() => { reported = 0; });
+    }
   }
 
   /* ---- notifications ---- */
@@ -208,12 +216,21 @@ const ChatLive = (function () {
   }
 
   /* ---- polling ---- */
+
+  /**
+   * One request carries everything the thread needs: new messages, who's typing, and how
+   * far everyone has read. `rev` is the server's fingerprint of the mutable bits — when
+   * ours is stale we get the whole thread back instead, which is how a reaction, edit or
+   * delete on an *older* message reaches us (a `since=` cursor could never see it).
+   */
   async function poll() {
     try {
-      const fresh = await api(`/chat?since=${Community.lastId()}`);
-      if (!fresh.length) return;
+      const state = await api(`/chat/live?since=${Community.lastId()}&rev=${encodeURIComponent(rev)}`);
+      rev = state.rev;
+      Community.setTyping(state.typing);
+      Community.setReceipts(state.receipts);
 
-      const added = Community.applyIncoming(fresh);
+      const added = state.full ? Community.replaceAll(state.full) : Community.applyIncoming(state.messages);
       const fromOthers = added.filter((m) => m.member !== me());
       if (!fromOthers.length) return;
 
@@ -233,7 +250,7 @@ const ChatLive = (function () {
   }
 
   /* ---- mobile dock ---- */
-  function openDock() {
+  function openDock(full) {
     const pane = document.getElementById('pane-chat');
     homeParent = pane.parentNode;
     homeNext = pane.nextSibling;
@@ -242,6 +259,7 @@ const ChatLive = (function () {
 
     document.getElementById('chat-dock').hidden = false;
     document.getElementById('dock-scrim').hidden = false;
+    setFull(full === undefined ? localStorage.getItem(FULL_KEY) === '1' : full);
     requestAnimationFrame(() => {
       document.getElementById('chat-dock').classList.add('open');
       document.getElementById('dock-scrim').classList.add('open');
@@ -250,6 +268,21 @@ const ChatLive = (function () {
     markRead();
     Community.scrollToBottom();
     syncFab();
+  }
+
+  /** Bottom sheet ↔ whole screen. Remembered, because it's a personal preference. */
+  function setFull(on) {
+    const dock = document.getElementById('chat-dock');
+    dock.classList.toggle('full', !!on);
+    const btn = document.getElementById('dock-full');
+    btn.innerHTML = on ? ICON.shrink : ICON.expand;
+    btn.title = on ? 'Exit full screen' : 'Full screen';
+    try { localStorage.setItem(FULL_KEY, on ? '1' : '0'); } catch {}
+  }
+
+  function toggleFull() {
+    setFull(!document.getElementById('chat-dock').classList.contains('full'));
+    Community.scrollToBottom();
   }
 
   function closeDock() {
@@ -308,9 +341,12 @@ const ChatLive = (function () {
     }
 
     document.getElementById('notify-toggle').addEventListener('click', askPermission);
-    document.getElementById('chat-fab').addEventListener('click', openDock);
+    document.getElementById('chat-fab').addEventListener('click', () => openDock());
     document.getElementById('dock-close').addEventListener('click', closeDock);
+    document.getElementById('dock-full').addEventListener('click', toggleFull);
     document.getElementById('dock-scrim').addEventListener('click', closeDock);
+    // On the Corner page the chat is inline and short; this hands it the whole screen.
+    document.getElementById('chat-expand').addEventListener('click', () => openDock(true));
     const hintClose = document.getElementById('ios-hint-close');
     if (hintClose) hintClose.addEventListener('click', dismissInstallHint);
     refreshBell();
