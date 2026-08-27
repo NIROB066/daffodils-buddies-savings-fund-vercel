@@ -1,1 +1,1 @@
-id,member,text,media,media_type,media_name,media_size,reply_to,timestamp
+id,member,text,media,media_type,media_name,media_size,reply_to,timestamp,reactions,deleted,edited_at

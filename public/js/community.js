@@ -1,5 +1,5 @@
-/* community.js — photo slider, posts feed, and chat with replies, @mentions and
-   attachments (photo / voice / video / any file).
+/* community.js — photo slider, posts feed, and chat with replies, @mentions,
+   reactions, editing, search and attachments (photo / voice / video / any file).
 
    Cross-device playback: we never transcode. Instead every clip is probed with
    canPlayType() and, if this browser can't decode it (e.g. a Chrome-recorded .webm
@@ -7,9 +7,17 @@
 const Community = (function () {
   let photos = [], posts = [], chat = [], people = [];
   let slideIdx = 0, slideTimer = null, replyTo = null;
-  let pendingMedia = null; // { kind, file }
+  let pendingMedia = null;   // { kind, file }
+  let editingId = null;      // message being edited in place
+  let receipts = {};         // name → highest message id that person has read
+  let typing = [];           // names currently typing
+  let term = '';             // chat search term (lower-cased)
+  let hits = [], hitIdx = 0; // ids of matching messages + which one we're parked on
+  const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉'];
+  const SPEEDS = [1, 1.5, 2];
   const mediaUrl = (value) => /^https?:\/\//i.test(String(value || ''))
     ? value : `/uploads/${encodeURIComponent(value || '')}`;
+  const myName = () => (Session.user && Session.user.name) || '';
 
   async function load() {
     [photos, posts, chat, people] = await Promise.all([
@@ -121,6 +129,11 @@ const Community = (function () {
     </a>`;
   }
 
+  /** 1× / 1.5× / 2× — one button that cycles, so it works with a thumb. */
+  function speedBtn() {
+    return `<button type="button" class="speed-btn" data-speed="0" title="Playback speed">1×</button>`;
+  }
+
   function mediaHtml(m) {
     if (!m.media) return '';
     const url = mediaUrl(m.media);
@@ -128,7 +141,8 @@ const Community = (function () {
 
     if (m.media_type === 'image') {
       return `<div class="media-wrap">
-        <img class="chat-media" src="${url}" loading="lazy" alt="${esc(name)}" />
+        <img class="chat-media" src="${url}" loading="lazy" alt="${esc(name)}"
+             data-full="${url}" data-dl="${dlUrl(m)}" data-cap="${esc(name)}" />
         ${dlBtn(m)}
       </div>`;
     }
@@ -137,6 +151,7 @@ const Community = (function () {
       // No `muted`: voice notes must be audible. preload=metadata keeps mobile data down.
       return `<div class="media-wrap">
         <audio class="chat-media" controls playsinline preload="metadata" src="${url}"></audio>
+        ${speedBtn()}
         ${dlBtn(m)}
       </div>`;
     }
@@ -146,53 +161,99 @@ const Community = (function () {
       // and we deliberately do NOT set `muted` so the clip plays with sound.
       return `<div class="media-wrap">
         <video class="chat-media" controls playsinline preload="metadata" src="${url}"></video>
+        ${speedBtn()}
         ${dlBtn(m)}
       </div>`;
     }
     return fileCard(m);
   }
 
+  /** Cycle a player through 1× → 1.5× → 2× and label the button with where it landed. */
+  function cycleSpeed(btn) {
+    const player = btn.closest('.media-wrap').querySelector('video, audio');
+    if (!player) return;
+    const next = (Number(btn.dataset.speed) + 1) % SPEEDS.length;
+    btn.dataset.speed = String(next);
+    player.playbackRate = SPEEDS[next];
+    btn.textContent = `${SPEEDS[next]}×`;
+    btn.classList.toggle('fast', next > 0);
+  }
+
   /* ---- mentions ---- */
   const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const mentionNames = () => ['all', ...people];
+
+  /* ---- link previews ----
+     Metadata is cached per URL for the life of the page. renderChat() runs on every
+     poll, so without this a card would be torn down and re-fetched every few seconds —
+     which is exactly why previews used to flicker in and out. */
+  const previewCache = new Map();    // url → { data, partial, at, tries }
+  const previewInFlight = new Set(); // urls we've already asked the server about
+  const PREVIEW_RETRY_MS = 60000;
+  const PREVIEW_TRIES = 3;
+
+  const youtubeId = (url) =>
+    url.match(/(?:youtube(?:-nocookie)?\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i)?.[1] || '';
+
+  /** The markup for one preview card, from whatever we know about the URL so far. */
+  function previewCard(url, data) {
+    const yt = youtubeId(url);
+    const host = url.match(/^https?:\/\/(?:www\.)?([^/]+)/i)?.[1] || 'Web link';
+    const image = (data && data.image) || (yt ? `https://img.youtube.com/vi/${yt}/hqdefault.jpg` : '');
+    const title = (data && data.title) || (yt ? 'YouTube video' : host);
+    const desc = (data && (data.description || data.site)) || (yt ? 'youtube.com' : 'Open link');
+    // A big image reads as a card; a thumbnail-less link stays a compact strip.
+    const rich = image ? ' rich' : '';
+    return `<a class="url-preview${rich}" data-preview-url="${esc(url)}" href="${esc(url)}" target="_blank" rel="noopener noreferrer">
+        ${image ? `<img src="${esc(image)}" alt="" loading="lazy" onerror="this.closest('.url-preview').classList.remove('rich');this.remove()" />` : ''}
+        <span class="url-preview-info"><b>${esc(title)}</b><small>${esc(desc)}</small></span>
+      </a>`;
+  }
 
   /** Turn pasted http(s) URLs into safe links after the message was escaped. */
   function linkUrls(escaped) {
     const links = [];
     const withPlaceholders = escaped.replace(/https?:\/\/[^\s<]+/gi, (value) => {
       const trailing = value.match(/[.,!?;:)\]]+$/)?.[0] || '';
-      const url = trailing ? value.slice(0, -trailing.length) : value;
+      const raw = trailing ? value.slice(0, -trailing.length) : value;
+      // The text arrived HTML-escaped; the URL itself has to go back to its real form
+      // before it can be used as an href or looked up in the cache.
+      const url = raw.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
       const token = `\u0000${links.length}\u0000`;
-      const youtubeId = url.match(/(?:youtube(?:-nocookie)?\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i)?.[1];
-      const host = url.match(/^https?:\/\/([^/]+)/i)?.[1] || 'Web link';
-      const preview = youtubeId
-        ? `<a class="url-preview youtube-preview" data-preview-url="${url}" href="${url}" target="_blank" rel="noopener noreferrer">
-            <img src="https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg" alt="YouTube video preview" loading="lazy" />
-            <span class="url-preview-info"><b>YouTube video</b><small>${url}</small></span>
-          </a>`
-        : `<a class="url-preview" data-preview-url="${url}" href="${url}" target="_blank" rel="noopener noreferrer">
-            <span class="url-preview-info"><b>${host}</b><small>Open link</small></span>
-          </a>`;
-      links.push(`${preview}<a class="chat-link" href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>${trailing}`);
+      const card = previewCard(url, (previewCache.get(url) || {}).data);
+      links.push(`${card}<a class="chat-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>${trailing}`);
       return token;
     });
     return withPlaceholders.replace(/\u0000(\d+)\u0000/g, (_token, index) => links[index]);
   }
 
-  async function hydratePreviews(root) {
-    const cards = [...root.querySelectorAll('.url-preview[data-preview-url]')];
-    await Promise.all(cards.map(async (card) => {
-      try {
-        const preview = await api(`/link-preview?url=${encodeURIComponent(card.dataset.previewUrl)}`);
-        if (!card.isConnected) return;
-        const image = preview.image
-          ? `<img src="${esc(preview.image)}" alt="${esc(preview.title)}" loading="lazy" />` : '';
-        card.innerHTML = `${image}<span class="url-preview-info">
-          <b>${esc(preview.title || preview.site || 'Web link')}</b>
-          <small>${esc(preview.description || preview.site || card.dataset.previewUrl)}</small>
-        </span>`;
-      } catch { /* Keep the fallback card when metadata is unavailable. */ }
-    }));
+  /**
+   * Should we (still) ask the server about this URL? A good answer is kept forever; a
+   * `partial` one — the server couldn't read the page — is kept too, so the card stays
+   * put, but we give it a couple more goes a minute apart before settling for it.
+   */
+  function needsPreview(url) {
+    if (previewInFlight.has(url)) return false;
+    const entry = previewCache.get(url);
+    if (!entry) return true;
+    return entry.partial && entry.tries < PREVIEW_TRIES && Date.now() - entry.at > PREVIEW_RETRY_MS;
+  }
+
+  /** Fetch metadata for any card we haven't resolved yet, then patch it in place. */
+  function hydratePreviews(root) {
+    root.querySelectorAll('.url-preview[data-preview-url]').forEach(async (card) => {
+      const url = card.dataset.previewUrl;
+      if (!needsPreview(url)) return;
+      previewInFlight.add(url);
+      let data = null;
+      try { data = await api(`/link-preview?url=${encodeURIComponent(url)}`); } catch { /* offline */ }
+      previewInFlight.delete(url);
+      if (!data) return;
+      const tries = ((previewCache.get(url) || {}).tries || 0) + 1;
+      previewCache.set(url, { data, partial: !!data.partial, at: Date.now(), tries });
+      document.querySelectorAll(`.url-preview[data-preview-url="${CSS.escape(url)}"]`)
+        .forEach((node) => { node.outerHTML = previewCard(url, data); });
+    });
   }
 
   /** Wrap @Name in a chip. Runs on already-escaped text, so it can't inject markup. */
@@ -212,41 +273,111 @@ const Community = (function () {
   }
 
   /* ---- chat ---- */
+
+  /** "Today" / "Yesterday" / "12 Aug 2026" — the divider between days. */
+  function dayLabel(stamp) {
+    const d = new Date(stamp);
+    if (isNaN(d)) return '';
+    const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((midnight(new Date()) - midnight(d)) / 86400000);
+    if (days === 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    if (days < 7) return d.toLocaleDateString('en-GB', { weekday: 'long' });
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  const clockOf = (stamp) => {
+    const d = new Date(stamp);
+    return isNaN(d) ? '' : d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  /** Delivery state for your own messages: ✓ sent, ✓✓ read (bright once everyone has). */
+  function ticksHtml(m, mine) {
+    if (!mine) return '';
+    const others = people.filter((n) => n && n !== myName());
+    if (!others.length) return '';
+    const id = parseInt(m.id, 10) || 0;
+    const seen = others.filter((n) => (receipts[n] || 0) >= id);
+    const title = seen.length ? `Read by ${seen.join(', ')}` : 'Sent';
+    return `<span class="ticks ${seen.length === others.length ? 'read' : ''}" title="${esc(title)}">`
+      + `${seen.length ? ICON.checks : ICON.check}</span>`;
+  }
+
+  function reactionsHtml(m) {
+    const entries = Object.entries(m.reactions || {});
+    if (!entries.length) return '';
+    return `<div class="reacts">${entries.map(([emoji, names]) => `
+      <button type="button" class="${names.includes(myName()) ? 'mine' : ''}"
+              data-react="${esc(emoji)}" data-id="${esc(m.id)}" title="${esc(names.join(', '))}">
+        ${esc(emoji)}<i>${names.length}</i>
+      </button>`).join('')}</div>`;
+  }
+
+  /** Everything the user typed that we're happy to search: body text + attachment name. */
+  const haystack = (m) => `${m.text || ''} ${m.media_name || ''}`.toLowerCase();
+
+  function bubbleHtml(m, byId) {
+    const mine = m.member === myName();
+    const gone = String(m.deleted) === '1';
+    const original = m.reply_to && byId[m.reply_to];
+    const ctx = original
+      ? `<div class="reply-ctx" data-jump="${esc(m.reply_to)}">↩ ${esc(original.member)}: `
+        + `${esc(String(original.deleted) === '1' ? 'deleted message' : (original.text || original.media_type || 'attachment').slice(0, 48))}</div>`
+      : '';
+
+    if (gone) {
+      return `<div class="bubble gone ${mine ? 'mine' : ''}" data-id="${esc(m.id)}">
+        ${mine ? '' : `<div class="who">${esc(m.member)}</div>`}
+        <div class="txt">🚫 This message was deleted</div>
+        <div class="brow"><span class="stamp">${clockOf(m.timestamp)}</span></div>
+      </div>`;
+    }
+
+    const body = m.text ? `<div class="txt">${linkMentions(linkUrls(esc(m.text)))}</div>` : '';
+    const dim = term && !haystack(m).includes(term) ? ' dimmed' : '';
+    return `<div class="bubble ${mine ? 'mine' : ''} ${mentionsMe(m) ? 'hit' : ''}${dim}" data-id="${esc(m.id)}">
+      <button type="button" class="mbtn" title="Message actions" data-menu="${esc(m.id)}">${ICON.more}</button>
+      ${mine ? '' : `<div class="who">${esc(m.member)}</div>`}
+      ${ctx}
+      ${mediaHtml(m)}
+      ${body}
+      ${reactionsHtml(m)}
+      <div class="brow">
+        <span class="stamp">${clockOf(m.timestamp)}</span>
+        ${m.edited_at ? '<span class="edited">edited</span>' : ''}
+        <span class="rbtn" data-reply="${esc(m.id)}">reply</span>
+        ${ticksHtml(m, mine)}
+      </div>
+    </div>`;
+  }
+
   function renderChat() {
     const box = document.getElementById('chat-box');
     if (!box) return;
-    const me = Session.user && Session.user.name;
     const byId = Object.fromEntries(chat.map((m) => [String(m.id), m]));
 
     if (!chat.length) {
       box.innerHTML = '<div class="empty">No messages yet — start the conversation! 💬</div>';
+      refreshSearchState();
       return;
     }
 
     // Keep the scroll pinned to the bottom only if the reader was already there.
-    const wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    const wasAtBottom = atBottom(box);
 
+    let lastDay = '';
     box.innerHTML = chat.map((m) => {
-      const mine = m.member === me;
-      const ctx = m.reply_to && byId[m.reply_to]
-        ? `<div class="reply-ctx">↩ ${esc(byId[m.reply_to].member)}: ${esc((byId[m.reply_to].text || '').slice(0, 40))}</div>` : '';
-      const body = m.text ? `<div class="txt">${linkMentions(linkUrls(esc(m.text)))}</div>` : '';
-      return `<div class="bubble ${mine ? 'mine' : ''} ${mentionsMe(m) ? 'hit' : ''}" data-id="${esc(m.id)}">
-        ${mine ? '' : `<div class="who">${esc(m.member)}</div>`}
-        ${ctx}
-        ${mediaHtml(m)}
-        ${body}
-        <div class="brow">
-          <span class="stamp">${fmtTime(m.timestamp)}</span>
-          <span class="rbtn" data-reply="${esc(m.id)}" data-who="${esc(m.member)}" data-text="${esc((m.text || '').slice(0, 40))}">reply</span>
-        </div>
-      </div>`;
+      const day = dayLabel(m.timestamp);
+      const sep = day && day !== lastDay ? `<div class="day-sep"><span>${esc(day)}</span></div>` : '';
+      lastDay = day || lastDay;
+      return sep + bubbleHtml(m, byId);
     }).join('');
-    hydratePreviews(box);
 
+    hydratePreviews(box);
+    highlightMatches(box);
     if (wasAtBottom) box.scrollTop = box.scrollHeight;
-    box.querySelectorAll('.rbtn').forEach((b) =>
-      b.addEventListener('click', () => setReply(b.dataset.reply, b.dataset.who, b.dataset.text)));
+    refreshSearchState();
+    updateJump();
 
     // If a player fails at runtime (codec the probe didn't catch), swap in a download card.
     box.querySelectorAll('video.chat-media, audio.chat-media').forEach((el) => {
@@ -257,20 +388,232 @@ const Community = (function () {
     });
   }
 
+  const atBottom = (box) => box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+
   function scrollToBottom() {
     const box = document.getElementById('chat-box');
     if (box) box.scrollTop = box.scrollHeight;
+    missed = 0;
+    updateJump();
   }
 
-  function setReply(id, who, text) {
-    replyTo = id;
-    document.getElementById('reply-text').textContent = `Replying to ${who}: ${text}`;
+  /** Scroll a message into view and flash it (used by search and reply context). */
+  function jumpTo(id) {
+    const el = document.querySelector(`#chat-box .bubble[data-id="${CSS.escape(String(id))}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.remove('flash');
+    void el.offsetWidth;   // restart the animation if it's already running
+    el.classList.add('flash');
+  }
+
+  /* ---- jump-to-latest button ---- */
+  let missed = 0;
+
+  function updateJump() {
+    const box = document.getElementById('chat-box');
+    const btn = document.getElementById('chat-jump');
+    if (!box || !btn) return;
+    const down = !atBottom(box);
+    btn.hidden = !down;
+    if (!down) missed = 0;
+    const badge = document.getElementById('chat-jump-count');
+    badge.hidden = missed < 1;
+    badge.textContent = missed > 9 ? '9+' : String(missed);
+  }
+
+  /* ---- search ---- */
+  function setSearch(value) {
+    term = String(value || '').trim().toLowerCase();
+    renderChat();
+    if (term && hits.length) jumpTo(hits[hitIdx]);
+  }
+
+  function refreshSearchState() {
+    const previous = hits[hitIdx];
+    hits = term ? chat.filter((m) => String(m.deleted) !== '1' && haystack(m).includes(term)).map((m) => String(m.id)) : [];
+    hitIdx = Math.max(0, hits.indexOf(String(previous)));
+
+    const count = document.getElementById('chat-search-count');
+    if (!count) return;
+    count.hidden = !term;
+    count.textContent = hits.length ? `${hitIdx + 1}/${hits.length}` : 'none';
+    ['chat-search-prev', 'chat-search-next', 'chat-search-clear'].forEach((id) => {
+      document.getElementById(id).hidden = !term;
+    });
+  }
+
+  function stepSearch(delta) {
+    if (!hits.length) return;
+    hitIdx = (hitIdx + delta + hits.length) % hits.length;
+    refreshSearchState();
+    jumpTo(hits[hitIdx]);
+  }
+
+  /**
+   * Wrap search matches in <mark>. Done over text nodes after rendering rather than in
+   * the HTML string, so it can never break a link or inject markup.
+   */
+  function highlightMatches(root) {
+    if (!term) return;
+    root.querySelectorAll('.bubble:not(.dimmed) .txt').forEach((el) => {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      for (const node of nodes) {
+        const lower = node.nodeValue.toLowerCase();
+        if (!lower.includes(term)) continue;
+        const frag = document.createDocumentFragment();
+        let from = 0;
+        for (let at = lower.indexOf(term); at !== -1; at = lower.indexOf(term, from)) {
+          frag.append(node.nodeValue.slice(from, at));
+          const mark = document.createElement('mark');
+          mark.textContent = node.nodeValue.slice(at, at + term.length);
+          frag.append(mark);
+          from = at + term.length;
+        }
+        frag.append(node.nodeValue.slice(from));
+        node.replaceWith(frag);
+      }
+    });
+  }
+
+  function setReply(id) {
+    const m = chat.find((x) => String(x.id) === String(id));
+    if (!m) return;
+    cancelEdit();
+    replyTo = String(id);
+    const label = String(m.deleted) === '1' ? 'deleted message'
+      : (m.text || { image: 'Photo', video: 'Video', audio: 'Voice message', file: 'File' }[m.media_type] || 'message');
+    document.getElementById('reply-text').textContent = `Replying to ${m.member}: ${label.slice(0, 60)}`;
     document.getElementById('reply-banner').classList.add('show');
     document.getElementById('chat-text').focus();
   }
   function clearReply() {
     replyTo = null;
     document.getElementById('reply-banner').classList.remove('show');
+  }
+
+  /* ---- edit / delete / react ---- */
+  function startEdit(id) {
+    const m = chat.find((x) => String(x.id) === String(id));
+    if (!m || m.member !== myName() || String(m.deleted) === '1') return;
+    clearReply();
+    editingId = String(id);
+    const ta = document.getElementById('chat-text');
+    ta.value = m.text || '';
+    autoGrow(ta);
+    ta.focus();
+    document.getElementById('edit-banner').classList.add('show');
+  }
+
+  function cancelEdit() {
+    if (!editingId) return;
+    editingId = null;
+    const ta = document.getElementById('chat-text');
+    ta.value = '';
+    autoGrow(ta);
+    document.getElementById('edit-banner').classList.remove('show');
+  }
+
+  /** Swap an updated message into the local thread and repaint. */
+  function replaceMessage(msg) {
+    const at = chat.findIndex((m) => String(m.id) === String(msg.id));
+    if (at === -1) return;
+    chat[at] = msg;
+    renderChat();
+  }
+
+  async function deleteMessage(id) {
+    if (!confirm('Delete this message for everyone?')) return;
+    try {
+      replaceMessage(await api(`/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }));
+      Toast.show('Message deleted.');
+    } catch (e) { Toast.show(e.message, true); }
+  }
+
+  async function react(id, emoji) {
+    try {
+      replaceMessage(await api(`/chat/${encodeURIComponent(id)}/react`, { method: 'POST', body: { emoji } }));
+    } catch (e) { Toast.show(e.message, true); }
+  }
+
+  async function copyMessage(id) {
+    const m = chat.find((x) => String(x.id) === String(id));
+    const text = m && (m.text || m.media_name);
+    if (!text) return Toast.show('Nothing to copy.', true);
+    try {
+      await navigator.clipboard.writeText(text);
+      Toast.show('Copied to clipboard 📋');
+    } catch { Toast.show('Your browser blocked the clipboard.', true); }
+  }
+
+  /* ---- message action menu (⋯ button, long-press, right-click) ---- */
+  function closeMenu() {
+    document.getElementById('msg-menu').hidden = true;
+    document.getElementById('msg-menu-scrim').hidden = true;
+  }
+
+  function openMenu(id, anchor) {
+    const m = chat.find((x) => String(x.id) === String(id));
+    if (!m || String(m.deleted) === '1') return;
+    const mine = m.member === myName();
+    const isAdmin = Session.user && Session.user.isAdmin;
+
+    document.getElementById('mm-reacts').innerHTML = REACTIONS.map((emoji) => {
+      const on = ((m.reactions || {})[emoji] || []).includes(myName());
+      return `<button type="button" class="${on ? 'on' : ''}" data-emoji="${esc(emoji)}">${esc(emoji)}</button>`;
+    }).join('');
+
+    const actions = [
+      { key: 'reply', label: 'Reply', icon: ICON.reply },
+      ...(m.text ? [{ key: 'copy', label: 'Copy text', icon: ICON.copy }] : []),
+      ...(mine && m.text ? [{ key: 'edit', label: 'Edit', icon: ICON.edit }] : []),
+      ...(m.media ? [{ key: 'save', label: 'Download attachment', icon: ICON.download }] : []),
+      ...(mine || isAdmin ? [{ key: 'delete', label: 'Delete', icon: ICON.trash, danger: true }] : []),
+    ];
+    document.getElementById('mm-actions').innerHTML = actions.map((a) =>
+      `<button type="button" data-act="${a.key}" class="${a.danger ? 'danger' : ''}">${a.icon}<span>${a.label}</span></button>`).join('');
+
+    const menu = document.getElementById('msg-menu');
+    menu.dataset.id = String(id);
+    menu.hidden = false;
+    document.getElementById('msg-menu-scrim').hidden = false;
+
+    // Anchor to the bubble, then nudge back inside the viewport.
+    const box = (anchor || document.body).getBoundingClientRect();
+    const size = menu.getBoundingClientRect();
+    const left = Math.min(Math.max(8, box.left), window.innerWidth - size.width - 8);
+    const top = box.bottom + size.height + 8 > window.innerHeight
+      ? Math.max(8, box.top - size.height - 6)
+      : box.bottom + 6;
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function runMenuAction(key) {
+    const id = document.getElementById('msg-menu').dataset.id;
+    closeMenu();
+    if (key === 'reply') return setReply(id);
+    if (key === 'copy') return copyMessage(id);
+    if (key === 'edit') return startEdit(id);
+    if (key === 'delete') return deleteMessage(id);
+    if (key === 'save') {
+      const m = chat.find((x) => String(x.id) === String(id));
+      if (m && m.media) window.open(dlUrl(m), '_blank', 'noopener');
+    }
+  }
+
+  /* ---- photo lightbox ---- */
+  function openLightbox(img) {
+    document.getElementById('lb-img').src = img.dataset.full;
+    document.getElementById('lb-cap').textContent = img.dataset.cap || '';
+    document.getElementById('lb-dl').href = img.dataset.dl;
+    document.getElementById('lightbox').hidden = false;
+  }
+  function closeLightbox() {
+    document.getElementById('lightbox').hidden = true;
+    document.getElementById('lb-img').src = '';
   }
 
   /* ---- @mention autocomplete ---- */
@@ -313,6 +656,7 @@ const Community = (function () {
     ta.value = ta.value.slice(0, mentionStart) + `@${name} ` + ta.value.slice(caret);
     const pos = mentionStart + name.length + 2;
     ta.setSelectionRange(pos, pos);
+    autoGrow(ta);
     closeMentions();
     ta.focus();
   }
@@ -327,27 +671,82 @@ const Community = (function () {
     return false;
   }
 
+  /* ---- emoji picker ---- */
+  const EMOJI = {
+    Smileys: ['😀', '😂', '🥹', '😊', '😍', '🤩', '😘', '😉', '😎', '🤓', '🥳', '🤔', '😅', '😭', '😡', '🥺', '😴', '🤯', '🙄', '😬'],
+    Gestures: ['👍', '👎', '👏', '🙏', '🤝', '💪', '✌️', '🤞', '👌', '🙌', '👋', '🫶'],
+    Hearts: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '💔', '💕', '✨', '🔥', '🎉'],
+    Life: ['🌼', '🌻', '🌈', '☕', '🍕', '🎂', '⚽', '🎵', '💸', '📸', '🚀', '🏆'],
+  };
+
+  function renderEmojiPicker() {
+    const pop = document.getElementById('emoji-pop');
+    pop.innerHTML = Object.entries(EMOJI).map(([group, list]) => `
+      <div class="eg-title">${group}</div>
+      <div class="eg-grid">${list.map((e) => `<button type="button" data-emoji="${e}">${e}</button>`).join('')}</div>`).join('');
+  }
+
+  function insertAtCaret(text) {
+    const ta = document.getElementById('chat-text');
+    const at = ta.selectionStart;
+    ta.value = ta.value.slice(0, at) + text + ta.value.slice(ta.selectionEnd);
+    ta.setSelectionRange(at + text.length, at + text.length);
+    autoGrow(ta);
+    ta.focus();
+  }
+
+  /* ---- composer helpers ---- */
+  function autoGrow(ta) {
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
+  }
+
+  /** Tell the others we're writing — at most once every few seconds. */
+  let typingSentAt = 0;
+  function pingTyping() {
+    if (Date.now() - typingSentAt < 3000) return;
+    typingSentAt = Date.now();
+    api('/chat/typing', { method: 'POST', body: {} }).catch(() => {});
+  }
+
+  /** Accept a file from a picker, a paste or a drop and stage it for sending. */
+  function stageFile(file) {
+    if (!file) return;
+    const kind = /^image\//.test(file.type) ? 'image'
+      : /^video\//.test(file.type) ? 'video'
+        : /^audio\//.test(file.type) ? 'audio' : 'file';
+    pendingMedia = { kind, file };
+    renderAttach();
+  }
+
   /* ---- actions ---- */
   function bind() {
     document.getElementById('photo-upload').addEventListener('click', uploadPhoto);
     document.getElementById('post-send').addEventListener('click', sendPost);
     document.getElementById('chat-send').addEventListener('click', sendChat);
     document.getElementById('reply-cancel').addEventListener('click', clearReply);
+    document.getElementById('edit-cancel').addEventListener('click', cancelEdit);
 
     const ta = document.getElementById('chat-text');
-    ta.addEventListener('input', updateMentions);
+    ta.addEventListener('input', () => { updateMentions(); autoGrow(ta); if (ta.value.trim()) pingTyping(); });
     ta.addEventListener('blur', () => setTimeout(closeMentions, 120));
     ta.addEventListener('keydown', (e) => {
       if (mentionKey(e)) { e.preventDefault(); return; }
+      if (e.key === 'Escape' && editingId) { e.preventDefault(); return cancelEdit(); }
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
     });
     document.getElementById('mention-btn').addEventListener('click', () => {
-      const pos = ta.selectionStart;
-      ta.value = ta.value.slice(0, pos) + '@' + ta.value.slice(pos);
-      ta.setSelectionRange(pos + 1, pos + 1);
-      ta.focus();
+      insertAtCaret('@');
       updateMentions();
     });
+
+    bindEmoji();
+    bindChatBox();
+    bindSearch();
+    bindMenu();
+    bindLightbox();
+    bindDropZone();
+    autoGrow(ta);
 
     // Attachments: photo picks an image, video opens the camera, file takes anything,
     // audio records a live voice message (no file upload).
@@ -372,6 +771,159 @@ const Community = (function () {
       else { pendingMedia.file = f; }
       renderAttach();
     });
+  }
+
+  function bindEmoji() {
+    renderEmojiPicker();
+    const pop = document.getElementById('emoji-pop');
+    document.getElementById('emoji-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeMentions();
+      pop.classList.toggle('show');
+    });
+    pop.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-emoji]');
+      if (!btn) return;
+      insertAtCaret(btn.dataset.emoji);
+      pop.classList.remove('show');
+    });
+    document.addEventListener('click', (e) => {
+      if (!pop.contains(e.target) && e.target.id !== 'emoji-btn') pop.classList.remove('show');
+    });
+  }
+
+  /** One delegated listener for everything inside the thread. */
+  function bindChatBox() {
+    const box = document.getElementById('chat-box');
+
+    box.addEventListener('click', (e) => {
+      const speed = e.target.closest('.speed-btn');
+      if (speed) { e.preventDefault(); return cycleSpeed(speed); }
+      const menu = e.target.closest('[data-menu]');
+      if (menu) return openMenu(menu.dataset.menu, menu.closest('.bubble'));
+      const reply = e.target.closest('[data-reply]');
+      if (reply) return setReply(reply.dataset.reply);
+      const jump = e.target.closest('[data-jump]');
+      if (jump) return jumpTo(jump.dataset.jump);
+      const chip = e.target.closest('[data-react]');
+      if (chip) return react(chip.dataset.id, chip.dataset.react);
+      const photo = e.target.closest('img.chat-media');
+      if (photo) return openLightbox(photo);
+    });
+
+    box.addEventListener('contextmenu', (e) => {
+      const bubble = e.target.closest('.bubble');
+      if (!bubble || e.target.closest('a, video, audio')) return;
+      e.preventDefault();
+      openMenu(bubble.dataset.id, bubble);
+    });
+
+    box.addEventListener('scroll', updateJump, { passive: true });
+    bindTouchGestures(box);
+  }
+
+  /**
+   * Phone gestures on a bubble: drag right to reply, press and hold for the action menu.
+   * Any real movement cancels the hold, so scrolling never pops the menu open.
+   */
+  function bindTouchGestures(box) {
+    let bubble = null, startX = 0, startY = 0, holdTimer = null, swiping = false;
+
+    const reset = () => {
+      clearTimeout(holdTimer);
+      if (bubble) bubble.style.transform = '';
+      bubble = null; swiping = false;
+    };
+
+    box.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return reset();
+      const target = e.target.closest('.bubble');
+      if (!target || target.classList.contains('gone') || e.target.closest('a, video, audio, button')) return;
+      bubble = target;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      holdTimer = setTimeout(() => { openMenu(bubble.dataset.id, bubble); reset(); }, 480);
+    }, { passive: true });
+
+    box.addEventListener('touchmove', (e) => {
+      if (!bubble) return;
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) clearTimeout(holdTimer);
+      if (!swiping && Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.6) swiping = true;
+      if (swiping) bubble.style.transform = `translateX(${Math.max(0, Math.min(dx, 64))}px)`;
+    }, { passive: true });
+
+    box.addEventListener('touchend', (e) => {
+      if (!bubble) return;
+      const dx = (e.changedTouches[0] || {}).clientX - startX;
+      const target = bubble;
+      const far = swiping && dx > 45;
+      reset();
+      if (far) setReply(target.dataset.id);
+    });
+    box.addEventListener('touchcancel', reset);
+  }
+
+  function bindSearch() {
+    const input = document.getElementById('chat-search-input');
+    input.addEventListener('input', () => setSearch(input.value));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); stepSearch(e.shiftKey ? -1 : 1); }
+      if (e.key === 'Escape') { e.preventDefault(); input.value = ''; setSearch(''); }
+    });
+    document.getElementById('chat-search-prev').addEventListener('click', () => stepSearch(-1));
+    document.getElementById('chat-search-next').addEventListener('click', () => stepSearch(1));
+    document.getElementById('chat-search-clear').addEventListener('click', () => {
+      input.value = ''; setSearch(''); input.focus();
+    });
+    document.getElementById('chat-jump').addEventListener('click', scrollToBottom);
+  }
+
+  function bindMenu() {
+    document.getElementById('msg-menu-scrim').addEventListener('click', closeMenu);
+    document.getElementById('mm-reacts').addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-emoji]');
+      if (!btn) return;
+      const id = document.getElementById('msg-menu').dataset.id;
+      closeMenu();
+      react(id, btn.dataset.emoji);
+    });
+    document.getElementById('mm-actions').addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-act]');
+      if (btn) runMenuAction(btn.dataset.act);
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenu(); closeLightbox(); } });
+  }
+
+  function bindLightbox() {
+    document.getElementById('lb-close').addEventListener('click', closeLightbox);
+    document.getElementById('lightbox').addEventListener('click', (e) => {
+      if (e.target.id === 'lightbox') closeLightbox();
+    });
+  }
+
+  /** Paste or drop an image/file straight into the composer. */
+  function bindDropZone() {
+    const zone = document.querySelector('.chat-compose');
+    const ta = document.getElementById('chat-text');
+
+    ta.addEventListener('paste', (e) => {
+      const item = [...(e.clipboardData ? e.clipboardData.files : [])][0];
+      if (!item) return;
+      e.preventDefault();
+      stageFile(item);
+    });
+
+    ['dragenter', 'dragover'].forEach((type) => zone.addEventListener(type, (e) => {
+      e.preventDefault();
+      zone.classList.add('dropping');
+    }));
+    ['dragleave', 'drop'].forEach((type) => zone.addEventListener(type, (e) => {
+      e.preventDefault();
+      zone.classList.remove('dropping');
+    }));
+    zone.addEventListener('drop', (e) => stageFile(e.dataTransfer && e.dataTransfer.files[0]));
   }
 
   /* ---- voice recording (talk, don't upload a file) ---- */
@@ -478,6 +1030,18 @@ const Community = (function () {
     const ta = document.getElementById('chat-text');
     const text = ta.value.trim();
     closeMentions();
+    document.getElementById('emoji-pop').classList.remove('show');
+
+    if (editingId) {
+      if (!text) return Toast.show('Message is empty — delete it instead.', true);
+      const id = editingId;
+      try {
+        const msg = await api(`/chat/${encodeURIComponent(id)}`, { method: 'PATCH', body: { text } });
+        cancelEdit();
+        replaceMessage(msg);
+      } catch (e) { Toast.show(e.message, true); }
+      return;
+    }
 
     if (pendingMedia && pendingMedia.file) {
       const form = new FormData();
@@ -488,7 +1052,7 @@ const Community = (function () {
       btn.disabled = true;
       try {
         const msg = await api('/chat/media', { method: 'POST', form });
-        ta.value = ''; pendingMedia = null; renderAttach(); clearReply();
+        ta.value = ''; autoGrow(ta); pendingMedia = null; renderAttach(); clearReply();
         chat.push(msg); renderChat(); scrollToBottom();
       } catch (e) { Toast.show(e.message, true); }
       finally { btn.disabled = false; }
@@ -498,22 +1062,62 @@ const Community = (function () {
     if (!text) return;
     try {
       const msg = await api('/chat', { method: 'POST', body: { text, reply_to: replyTo || '' } });
-      ta.value = ''; clearReply();
+      ta.value = ''; autoGrow(ta); clearReply();
       chat.push(msg); renderChat(); scrollToBottom();
     } catch (e) { Toast.show(e.message, true); }
   }
 
   /* ---- live-poll hooks (used by chatlive.js) ---- */
+
+  /** The whole thread, straight from the server — used when reactions/edits moved on. */
+  function replaceAll(list) {
+    const known = new Set(chat.map((m) => String(m.id)));
+    const fresh = list.filter((m) => !known.has(String(m.id)));
+    chat = list;
+    renderChat();
+    return fresh;
+  }
+
   /** Merge freshly-polled messages; returns the ones that were actually new. */
   function applyIncoming(list) {
     const known = new Set(chat.map((m) => String(m.id)));
     const fresh = list.filter((m) => !known.has(String(m.id)));
     if (!fresh.length) return [];
     chat.push(...fresh);
+    if (!atBottom(document.getElementById('chat-box'))) {
+      missed += fresh.filter((m) => m.member !== myName()).length;
+    }
     renderChat();
     return fresh;
   }
+
+  /** Who is typing right now (names, excluding me). */
+  function setTyping(names) {
+    const next = (names || []).filter(Boolean);
+    if (next.join('|') === typing.join('|')) return;
+    typing = next;
+    const row = document.getElementById('typing-row');
+    if (!row) return;
+    row.hidden = !typing.length;
+    if (!typing.length) return;
+    const who = typing.length === 1 ? `${typing[0]} is typing`
+      : typing.length === 2 ? `${typing[0]} and ${typing[1]} are typing`
+        : 'Several buddies are typing';
+    row.innerHTML = `<span class="typing-dots"><i></i><i></i><i></i></span><span>${esc(who)}…</span>`;
+  }
+
+  /** How far each buddy has read — drives the ✓/✓✓ on your own messages. */
+  function setReceipts(map) {
+    const next = map || {};
+    if (JSON.stringify(next) === JSON.stringify(receipts)) return;
+    receipts = next;
+    renderChat();
+  }
+
   const lastId = () => chat.reduce((max, m) => Math.max(max, parseInt(m.id, 10) || 0), 0);
 
-  return { load, bind, renderChat, applyIncoming, lastId, scrollToBottom, mentionsMe };
+  return {
+    load, bind, renderChat, applyIncoming, replaceAll, lastId, scrollToBottom,
+    mentionsMe, setTyping, setReceipts,
+  };
 })();
