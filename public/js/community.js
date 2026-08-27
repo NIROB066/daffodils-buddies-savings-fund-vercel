@@ -33,13 +33,17 @@ const Community = (function () {
       <div class="slides" id="slides">
         ${photos.map((p) => `
           <div class="slide">
-            <img src="/uploads/${esc(p.filename)}" alt="${esc(p.caption)}" loading="lazy" />
+            <img src="/uploads/${esc(p.filename)}" data-filename="${esc(p.filename)}" alt="${esc(p.caption)}" loading="lazy" />
             <div class="cap"><b>${esc(p.member)}</b>${p.caption ? ' — ' + esc(p.caption) : ''}</div>
           </div>`).join('')}
       </div>
       <div class="dots">${photos.map((_, i) => `<i data-i="${i}"></i>`).join('')}</div>`;
     slideIdx = 0;
     update();
+    el.querySelectorAll('.slide img').forEach((image) => image.addEventListener('error', () => {
+      photos = photos.filter((photo) => photo.filename !== image.dataset.filename);
+      renderSlider();
+    }, { once: true }));
     el.querySelectorAll('.dots i').forEach((d) => d.addEventListener('click', () => { slideIdx = +d.dataset.i; update(); restart(); }));
     restart();
   }
