@@ -257,8 +257,9 @@ function preview(msg) {
 /** Names this message @mentions, so the service worker can personalise the title. */
 function mentionedNames(text) {
   const body = String(text || '');
-  return readCsv(file('login')).map((u) => u.name).filter(Boolean)
-    .filter((name) => new RegExp(`@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`).test(body));
+  const names = readCsv(file('login')).map((u) => u.name).filter(Boolean);
+  if (/@all(?![\w])/i.test(body)) return names;
+  return names.filter((name) => new RegExp(`@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`).test(body));
 }
 
 /**

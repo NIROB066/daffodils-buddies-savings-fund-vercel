@@ -154,22 +154,35 @@ const Community = (function () {
 
   /* ---- mentions ---- */
   const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const mentionNames = () => ['all', ...people];
+
+  /** Turn pasted http(s) URLs into safe links after the message was escaped. */
+  function linkUrls(escaped) {
+    const links = [];
+    const withPlaceholders = escaped.replace(/https?:\/\/[^\s<]+/gi, (value) => {
+      const trailing = value.match(/[.,!?;:)\]]+$/)?.[0] || '';
+      const url = trailing ? value.slice(0, -trailing.length) : value;
+      const token = `\u0000${links.length}\u0000`;
+      links.push(`<a class="chat-link" href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>${trailing}`);
+      return token;
+    });
+    return withPlaceholders.replace(/\u0000(\d+)\u0000/g, (_token, index) => links[index]);
+  }
 
   /** Wrap @Name in a chip. Runs on already-escaped text, so it can't inject markup. */
   function linkMentions(escaped) {
-    if (!people.length) return escaped;
-    const names = [...people].sort((a, b) => b.length - a.length).map(reEsc).join('|');
+    const names = mentionNames().sort((a, b) => b.length - a.length).map(reEsc).join('|');
     const re = new RegExp(`@(${names})(?![\\w])`, 'g');
     const me = (Session.user && Session.user.name) || '';
     return escaped.replace(re, (_all, name) =>
-      `<span class="mention${name === me ? ' me' : ''}">@${name}</span>`);
+      `<span class="mention${name === 'all' || name === me ? ' me' : ''}">@${name}</span>`);
   }
 
   /** Does this message mention me by name? */
   function mentionsMe(m) {
     const me = (Session.user && Session.user.name) || '';
     if (!me) return false;
-    return new RegExp(`@${reEsc(me)}(?![\\w])`).test(m.text || '');
+    return /@all(?![\w])/i.test(m.text || '') || new RegExp(`@${reEsc(me)}(?![\\w])`).test(m.text || '');
   }
 
   /* ---- chat ---- */
@@ -191,7 +204,7 @@ const Community = (function () {
       const mine = m.member === me;
       const ctx = m.reply_to && byId[m.reply_to]
         ? `<div class="reply-ctx">↩ ${esc(byId[m.reply_to].member)}: ${esc((byId[m.reply_to].text || '').slice(0, 40))}</div>` : '';
-      const body = m.text ? `<div class="txt">${linkMentions(esc(m.text))}</div>` : '';
+      const body = m.text ? `<div class="txt">${linkMentions(linkUrls(esc(m.text)))}</div>` : '';
       return `<div class="bubble ${mine ? 'mine' : ''} ${mentionsMe(m) ? 'hit' : ''}" data-id="${esc(m.id)}">
         ${mine ? '' : `<div class="who">${esc(m.member)}</div>`}
         ${ctx}
@@ -248,7 +261,7 @@ const Community = (function () {
     if (!hit) return closeMentions();
 
     const term = hit[2].toLowerCase();
-    mentionMatches = people.filter((n) => n.toLowerCase().startsWith(term));
+    mentionMatches = mentionNames().filter((n) => n.toLowerCase().startsWith(term));
     if (!mentionMatches.length) return closeMentions();
 
     mentionStart = before.length - hit[2].length - 1; // index of the '@'
