@@ -437,7 +437,11 @@ select {
 .bubble.mine .who { color: rgba(255,255,255,.9); }
 .bubble .reply-ctx { font-size: 11px; opacity: .85; border-left: 2px solid currentColor; padding-left: 7px; margin-bottom: 4px; }
 .bubble .txt { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
-.bubble .chat-link { text-decoration: underline; }
+.bubble .chat-link {
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
 .bubble.mine .chat-link { color: #fff; }
 .url-preview {
   display: flex; align-items: stretch; gap: 10px; width: 100%; max-width: 280px;
