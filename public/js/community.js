@@ -70,7 +70,7 @@ const Community = (function () {
           <span class="avatar-sm" style="background:${avatarColor(p.member)}">${initials(p.member)}</span>
           <div><div class="who">${esc(p.member)}</div><div class="when">${fmtTime(p.timestamp)}</div></div>
         </div>
-        ${p.text ? `<div>${esc(p.text)}</div>` : ''}
+        ${p.text ? `<div class="body">${esc(p.text)}</div>` : ''}
         ${p.image ? `<img src="${esc(p.image)}" alt="post image" loading="lazy" />` : ''}
       </div>`).join('');
   }
