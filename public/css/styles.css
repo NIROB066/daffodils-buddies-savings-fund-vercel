@@ -946,7 +946,7 @@ video.chat-media { max-height: 280px; width: 100%; background: #000; }
 /* Phone readability and viewport fit. Keep every mobile surface inside the viewport. */
 @media (max-width: 720px) {
   html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
-  .topbar, .hero, .layout { width: 100%; max-width: 100%; }
+  main, .topbar, .hero, .layout { width: 100%; max-width: 100%; }
   .layout { padding-left: 12px; padding-right: 12px; }
   .main-col, .side-col, .section, .social { width: 100%; max-width: 100%; }
 
