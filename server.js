@@ -9,6 +9,7 @@
  */
 const path = require('path');
 const fs = require('fs');
+const dns = require('dns').promises;
 const express = require('express');
 const multer = require('multer');
 
@@ -152,6 +153,76 @@ function requireAdmin(req, res, next) {
 function publicUser(u) {
   return { email: u.email, name: u.name, isAdmin: String(u.is_admin) === '1' };
 }
+
+const linkPreviewCache = new Map();
+const LINK_PREVIEW_TTL = 10 * 60 * 1000;
+
+function isPrivateAddress(address) {
+  return address === '::1' || address === 'localhost'
+    || /^127\./.test(address) || /^10\./.test(address)
+    || /^192\.168\./.test(address) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(address)
+    || /^169\.254\./.test(address) || /^fc00:/i.test(address)
+    || /^fe80:/i.test(address);
+}
+
+async function isPublicUrl(value) {
+  let target;
+  try { target = new URL(value); } catch { return null; }
+  if (!['http:', 'https:'].includes(target.protocol)) return null;
+  if (isPrivateAddress(target.hostname.toLowerCase())) return null;
+  try {
+    const addresses = await dns.lookup(target.hostname, { all: true });
+    if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) return null;
+  } catch { return null; }
+  return target;
+}
+
+function metaContent(html, key) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${escapedKey}["'][^>]+content=["']([^"']*)["']`, 'i'))
+    || html.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${escapedKey}["']`, 'i'));
+  return match ? match[1].trim() : '';
+}
+
+function decodeHtml(value) {
+  return String(value || '').replace(/&(?:amp|#38);/gi, '&').replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, '<').replace(/&gt;/gi, '>');
+}
+
+app.get('/api/link-preview', async (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  const target = await isPublicUrl(req.query.url);
+  if (!target) return res.status(400).json({ error: 'Only public http(s) URLs are supported.' });
+  const key = target.href;
+  const cached = linkPreviewCache.get(key);
+  if (cached && Date.now() - cached.time < LINK_PREVIEW_TTL) return res.json(cached.data);
+
+  try {
+    const response = await fetch(key, {
+      headers: { 'user-agent': 'DaffodilsLinkPreview/1.0' },
+      redirect: 'follow', signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok || !(response.headers.get('content-type') || '').includes('text/html')) throw new Error('Not HTML');
+    const length = Number(response.headers.get('content-length') || 0);
+    if (length > 1024 * 1024) throw new Error('Response too large');
+    const html = (await response.text()).slice(0, 1024 * 1024);
+    const data = {
+      url: key,
+      title: decodeHtml(metaContent(html, 'og:title') || metaContent(html, 'twitter:title') || html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] || target.hostname),
+      description: decodeHtml(metaContent(html, 'og:description') || metaContent(html, 'twitter:description')),
+      image: metaContent(html, 'og:image') || metaContent(html, 'twitter:image'),
+      site: decodeHtml(metaContent(html, 'og:site_name') || target.hostname),
+    };
+    if (data.image) data.image = new URL(data.image, response.url || key).href;
+    linkPreviewCache.set(key, { time: Date.now(), data });
+    res.json(data);
+  } catch {
+    const data = { url: key, title: target.hostname, description: '', image: '', site: target.hostname };
+    linkPreviewCache.set(key, { time: Date.now(), data });
+    res.json(data);
+  }
+});
 
 // ---- auth routes --------------------------------------------------------
 

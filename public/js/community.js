@@ -163,10 +163,36 @@ const Community = (function () {
       const trailing = value.match(/[.,!?;:)\]]+$/)?.[0] || '';
       const url = trailing ? value.slice(0, -trailing.length) : value;
       const token = `\u0000${links.length}\u0000`;
-      links.push(`<a class="chat-link" href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>${trailing}`);
+      const youtubeId = url.match(/(?:youtube(?:-nocookie)?\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i)?.[1];
+      const host = url.match(/^https?:\/\/([^/]+)/i)?.[1] || 'Web link';
+      const preview = youtubeId
+        ? `<a class="url-preview youtube-preview" data-preview-url="${url}" href="${url}" target="_blank" rel="noopener noreferrer">
+            <img src="https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg" alt="YouTube video preview" loading="lazy" />
+            <span class="url-preview-info"><b>YouTube video</b><small>${url}</small></span>
+          </a>`
+        : `<a class="url-preview" data-preview-url="${url}" href="${url}" target="_blank" rel="noopener noreferrer">
+            <span class="url-preview-info"><b>${host}</b><small>Open link</small></span>
+          </a>`;
+      links.push(`${preview}<a class="chat-link" href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>${trailing}`);
       return token;
     });
     return withPlaceholders.replace(/\u0000(\d+)\u0000/g, (_token, index) => links[index]);
+  }
+
+  async function hydratePreviews(root) {
+    const cards = [...root.querySelectorAll('.url-preview[data-preview-url]')];
+    await Promise.all(cards.map(async (card) => {
+      try {
+        const preview = await api(`/link-preview?url=${encodeURIComponent(card.dataset.previewUrl)}`);
+        if (!card.isConnected) return;
+        const image = preview.image
+          ? `<img src="${esc(preview.image)}" alt="${esc(preview.title)}" loading="lazy" />` : '';
+        card.innerHTML = `${image}<span class="url-preview-info">
+          <b>${esc(preview.title || preview.site || 'Web link')}</b>
+          <small>${esc(preview.description || preview.site || card.dataset.previewUrl)}</small>
+        </span>`;
+      } catch { /* Keep the fallback card when metadata is unavailable. */ }
+    }));
   }
 
   /** Wrap @Name in a chip. Runs on already-escaped text, so it can't inject markup. */
@@ -216,6 +242,7 @@ const Community = (function () {
         </div>
       </div>`;
     }).join('');
+    hydratePreviews(box);
 
     if (wasAtBottom) box.scrollTop = box.scrollHeight;
     box.querySelectorAll('.rbtn').forEach((b) =>
