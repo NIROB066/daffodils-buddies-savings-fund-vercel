@@ -132,40 +132,43 @@ https://docs.google.com/spreadsheets/d/THIS_IS_THE_SHEET_ID/edit
 In [Google Cloud Console](https://console.cloud.google.com/):
 
 1. Create a project, or select an existing project.
-2. Enable **Google Sheets API** and **Google Drive API**.
+2. Enable **Google Sheets API**.
 3. Open **IAM & Admin → Service Accounts** and create a service account.
 4. Create a JSON key for it and download the file temporarily. Never commit this file.
 5. Copy the service account email. It looks like `something@project.iam.gserviceaccount.com`.
 
-Share the Spreadsheet with that email as **Editor**. Create a Google Drive folder for uploads,
-share that folder with the same email as **Editor**, and copy the folder ID from its URL:
+Share the Spreadsheet with that email as **Editor**.
 
-```text
-https://drive.google.com/drive/folders/THIS_IS_THE_FOLDER_ID
-```
+### 3. Create a Vercel Blob store
 
-### 3. Deploy the app
+In the Vercel project, open **Storage → Create → Blob**, create a store, and connect it to this
+project. Vercel will add `BLOB_READ_WRITE_TOKEN` automatically. Blob stores the uploaded files;
+Google Sheets stores their URLs and the rest of the app data. No Google Workspace or Drive API is
+needed for uploads.
+
+### 4. Deploy the app
 
 Push the project to GitHub, then go to [vercel.com](https://vercel.com/), choose **Add New →
 Project**, import the repository, and click **Deploy**. The first deploy may show a storage error;
 that is expected until the environment variables are added.
 
-Open the Vercel project and go to **Settings → Environment Variables**. Add these four required
+Open the Vercel project and go to **Settings → Environment Variables**. Add these required
 variables for **Production**, **Preview**, and **Development**:
 
 | Variable | Value |
 |---|---|
 | `GOOGLE_SHEET_ID` | The Spreadsheet ID from step 1 |
-| `GOOGLE_DRIVE_FOLDER_ID` | The Drive folder ID from step 2 |
-| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | The service account email |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | The service account email from step 2 |
 | `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` | The `private_key` value from the downloaded JSON key |
+| `BLOB_READ_WRITE_TOKEN` | Automatically added when the Blob store is connected |
 
 For the private key, paste the complete value including `BEGIN PRIVATE KEY` and `END PRIVATE
 KEY`. Keep the `\\n` characters if Vercel displays them that way. Do not paste the whole JSON file.
 Then choose **Redeploy** from the Vercel deployment menu.
 
 At this point the app works, and data survives Vercel redeploys. Test login, adding one small
-investment, and uploading one image before inviting everyone.
+investment, and uploading one image before inviting everyone. Remove any old
+`GOOGLE_DRIVE_FOLDER_ID` variable from Vercel.
 
 ### 4. Optional: enable phone notifications
 

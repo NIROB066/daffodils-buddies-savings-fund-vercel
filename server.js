@@ -14,6 +14,7 @@ const multer = require('multer');
 
 const { readCsv, writeCsv, appendCsv, initGoogleStorage } = require('./lib/csv');
 const googleStorage = require('./lib/google-storage');
+const blobStorage = require('./lib/blob-storage');
 const { DATA, UPLOADS, PERSISTENT, file, bootstrap } = require('./lib/paths');
 
 // Must run before anything reads or writes data: on a fresh persistent disk this copies
@@ -32,12 +33,11 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 // Inline viewing/streaming. express.static honours Range requests, which is what lets
 // <video>/<audio> seek (and what iOS Safari requires before it will play at all).
-if (!googleStorage.configured()) {
+if (!blobStorage.configured()) {
   app.use('/uploads', express.static(UPLOADS, { acceptRanges: true, maxAge: '7d' }));
 } else {
   app.get('/uploads/:file', (req, res) => {
-    const id = path.basename(req.params.file);
-    res.redirect(`https://drive.google.com/uc?export=view&id=${encodeURIComponent(id)}`);
+    res.status(404).send('Legacy local upload not found.');
   });
 }
 
@@ -47,10 +47,7 @@ if (!googleStorage.configured()) {
  * Content-Disposition server-side. `?name=` is the pretty name to save as.
  */
 app.get('/download/:file', (req, res) => {
-  if (googleStorage.configured()) {
-    const id = path.basename(req.params.file);
-    return res.redirect(`https://drive.google.com/uc?export=download&id=${encodeURIComponent(id)}`);
-  }
+  if (blobStorage.configured()) return res.status(404).send('Legacy upload not found.');
   const stored = path.basename(req.params.file);            // never escape UPLOADS
   const full = path.join(UPLOADS, stored);
   if (!fs.existsSync(full)) return res.status(404).send('File not found.');
@@ -125,7 +122,7 @@ function pruneChat() {
     writeCsv(file('chat'), keep, COLS.chat);
     for (const r of drop) {
       if (!r.media) continue;
-      if (googleStorage.configured()) googleStorage.remove(r.media).catch(() => {});
+      if (blobStorage.configured()) blobStorage.remove(r.media).catch(() => {});
       else try { fs.unlinkSync(path.join(UPLOADS, path.basename(r.media))); } catch { /* already gone */ }
     }
   }
@@ -325,12 +322,13 @@ app.post('/api/push/unsubscribe', (req, res) => {
 // in the memories banner looks far worse than one fewer slide.
 app.get('/api/photos', (_req, res) =>
   res.json(readCsv(file('photos'))
-    .filter((p) => p.filename && (googleStorage.configured()
-      || fs.existsSync(path.join(UPLOADS, path.basename(p.filename)))))
+    .filter((p) => p.filename && (blobStorage.configured()
+      ? /^https:\/\//i.test(p.filename)
+      : fs.existsSync(path.join(UPLOADS, path.basename(p.filename)))))
     .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))));
 
 // ---- uploads ------------------------------------------------------------
-const storage = googleStorage.configured() ? multer.memoryStorage() : multer.diskStorage({
+const storage = blobStorage.configured() ? multer.memoryStorage() : multer.diskStorage({
   destination: UPLOADS,
   filename: (_req, f, cb) => {
     const safe = f.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -347,13 +345,12 @@ const upload = multer({
 // (bigger cap for short clips and documents).
 const chatMedia = multer({ storage, limits: { fileSize: 30 * 1024 * 1024 } });
 
-async function uploadToDrive(req, res, next) {
-  if (!googleStorage.configured() || !req.file) return next();
+async function uploadToBlob(req, res, next) {
+  if (!blobStorage.configured() || !req.file) return next();
   try {
     const safe = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const saved = await googleStorage.upload(req.file.buffer, `${Date.now()}_${safe}`, req.file.mimetype);
-    req.file.filename = saved.id;
-    req.file.driveUrl = saved.url;
+    const saved = await blobStorage.upload(req.file.buffer, `${Date.now()}_${safe}`, req.file.mimetype);
+    req.file.filename = saved.url;
     req.file.size = saved.size;
     next();
   } catch (error) {
@@ -373,7 +370,7 @@ function mediaKind(mime) {
 }
 
 /** Send a chat message carrying a photo / audio / video / file (and optional caption). */
-app.post('/api/chat/media', chatMedia.single('media'), uploadToDrive, (req, res) => {
+app.post('/api/chat/media', chatMedia.single('media'), uploadToBlob, (req, res) => {
   const user = currentUser(req);
   if (!user) return res.status(401).json({ error: 'Please log in.' });
   if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
@@ -391,7 +388,7 @@ app.post('/api/chat/media', chatMedia.single('media'), uploadToDrive, (req, res)
   pushChat(user, msg);
 });
 
-app.post('/api/photos', upload.single('photo'), uploadToDrive, (req, res) => {
+app.post('/api/photos', upload.single('photo'), uploadToBlob, (req, res) => {
   const user = currentUser(req);
   if (!user) return res.status(401).json({ error: 'Please log in.' });
   if (!req.file) return res.status(400).json({ error: 'No image uploaded.' });
@@ -401,17 +398,17 @@ app.post('/api/photos', upload.single('photo'), uploadToDrive, (req, res) => {
     caption: (req.body && req.body.caption) || '', timestamp: new Date().toISOString(),
   };
   appendCsv(file('photos'), photo, COLS.photos);
-  res.json({ ...photo, url: googleStorage.configured() ? req.file.driveUrl : `/uploads/${photo.filename}` });
+  res.json({ ...photo, url: blobStorage.configured() ? photo.filename : `/uploads/${photo.filename}` });
 });
 
 // Also allow attaching an uploaded image to a post in one call.
-app.post('/api/posts/photo', upload.single('photo'), uploadToDrive, (req, res) => {
+app.post('/api/posts/photo', upload.single('photo'), uploadToBlob, (req, res) => {
   const user = currentUser(req);
   if (!user) return res.status(401).json({ error: 'Please log in.' });
   const rows = readCsv(file('posts'));
   const post = {
     id: nextId(rows), member: user.name, text: (req.body && req.body.text) || '',
-    image: req.file ? `/uploads/${req.file.filename}` : '', timestamp: new Date().toISOString(),
+    image: req.file ? (blobStorage.configured() ? req.file.filename : `/uploads/${req.file.filename}`) : '',
   };
   appendCsv(file('posts'), post, COLS.posts);
   res.json(post);
@@ -473,7 +470,7 @@ function unlinkFiles(rows, pick) {
   for (const r of rows) {
     const ref = pick(r);
     if (!ref) continue;
-    if (googleStorage.configured()) googleStorage.remove(ref).catch(() => {});
+    if (blobStorage.configured()) blobStorage.remove(ref).catch(() => {});
     else try { fs.unlinkSync(path.join(UPLOADS, path.basename(ref))); } catch { /* already gone */ }
   }
 }

@@ -8,6 +8,8 @@ const Community = (function () {
   let photos = [], posts = [], chat = [], people = [];
   let slideIdx = 0, slideTimer = null, replyTo = null;
   let pendingMedia = null; // { kind, file }
+  const mediaUrl = (value) => /^https?:\/\//i.test(String(value || ''))
+    ? value : `/uploads/${encodeURIComponent(value || '')}`;
 
   async function load() {
     [photos, posts, chat, people] = await Promise.all([
@@ -33,7 +35,7 @@ const Community = (function () {
       <div class="slides" id="slides">
         ${photos.map((p) => `
           <div class="slide">
-            <img src="/uploads/${esc(p.filename)}" data-filename="${esc(p.filename)}" alt="${esc(p.caption)}" loading="lazy" />
+            <img src="${esc(mediaUrl(p.filename))}" data-filename="${esc(p.filename)}" alt="${esc(p.caption)}" loading="lazy" />
             <div class="cap"><b>${esc(p.member)}</b>${p.caption ? ' — ' + esc(p.caption) : ''}</div>
           </div>`).join('')}
       </div>
@@ -101,7 +103,8 @@ const Community = (function () {
 
   /** Download URL that restores the original filename via Content-Disposition. */
   function dlUrl(m) {
-    return `/download/${encodeURIComponent(m.media)}?name=${encodeURIComponent(m.media_name || m.media)}`;
+    return /^https?:\/\//i.test(String(m.media || ''))
+      ? m.media : `/download/${encodeURIComponent(m.media)}?name=${encodeURIComponent(m.media_name || m.media)}`;
   }
   function dlBtn(m, label = 'Save') {
     return `<a class="dl-btn" href="${dlUrl(m)}" title="Download ${esc(m.media_name || '')}">${ICON.download}<span>${label}</span></a>`;
@@ -120,7 +123,7 @@ const Community = (function () {
 
   function mediaHtml(m) {
     if (!m.media) return '';
-    const url = `/uploads/${encodeURIComponent(m.media)}`;
+    const url = mediaUrl(m.media);
     const name = m.media_name || m.media;
 
     if (m.media_type === 'image') {
