@@ -98,24 +98,29 @@ if (!googleStorage.configured()) migrateLogin();
  * column list is enough: missing values become empty strings and the header gains the
  * new names, which is what keeps `appendCsv` (and the Google Sheets tab) aligned.
  */
+let chatMigrated = false;
 function migrateChat() {
+  if (chatMigrated) return;
+  chatMigrated = true;
   const rows = readCsv(file('chat'));
-  if (rows.length && 'reactions' in rows[0] && 'edited_at' in rows[0]) return;
+  // An empty thread has nothing to widen — rewriting it would just cost a Sheets write.
+  if (!rows.length || ('reactions' in rows[0] && 'edited_at' in rows[0])) return;
   writeCsv(file('chat'), rows, COLS.chat);
 }
 
 const storageReady = googleStorage.configured()
-  ? initGoogleStorage(COLS).then(migrateChat).catch((error) => {
-    console.error('Google storage initialization failed:', error.message);
-    throw error;
-  })
-  : Promise.resolve(migrateChat());
+  ? () => initGoogleStorage(COLS).then(migrateChat)
+  : (() => { const done = Promise.resolve(migrateChat()); return () => done; })();
 
+// Never cache a storage failure: initGoogleStorage retries on the next request, so a
+// transient Sheets hiccup costs one error instead of bricking the whole instance.
 app.use('/api', async (_req, res, next) => {
   try {
-    await storageReady;
+    await storageReady();
     next();
-  } catch {
+  } catch (error) {
+    console.error('Storage unavailable:', error?.message || error);
+    res.set('Retry-After', '2');
     res.status(503).json({ error: 'Data storage is temporarily unavailable.' });
   }
 });

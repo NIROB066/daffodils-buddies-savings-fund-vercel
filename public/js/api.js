@@ -22,10 +22,18 @@ async function api(pathname, { method = 'GET', body, form } = {}) {
     headers['content-type'] = 'application/json';
     payload = JSON.stringify(body);
   }
-  const res = await fetch(`/api${pathname}`, { method, headers, body: payload });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.error || 'Request failed'), { data, status: res.status });
-  return data;
+  // A cold serverless instance can answer 503 while it is still reaching the spreadsheet.
+  // Retrying beats showing "storage unavailable" for something that works a second later.
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`/api${pathname}`, { method, headers, body: payload });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) return data;
+    if (res.status === 503 && attempt < 3) {
+      await new Promise((done) => setTimeout(done, 400 * (attempt + 1)));
+      continue;
+    }
+    throw Object.assign(new Error(data.error || 'Request failed'), { data, status: res.status });
+  }
 }
 
 // Colorful, stable avatar color per name.
