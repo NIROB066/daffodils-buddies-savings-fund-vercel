@@ -142,7 +142,18 @@ Ids are auto-increment integers: `nextId(rows) = max(id) + 1`.
 | Backend | Enabled by | Effect |
 | --- | --- | --- |
 | Vercel Blob | `BLOB_READ_WRITE_TOKEN` | Uploads go to Blob; `media`/`filename` hold absolute `https://` URLs |
-| Google Sheets | `GOOGLE_SHEET_ID` + `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` | `lib/csv.js` reads/writes spreadsheet tabs instead of files; loaded once per instance via `initGoogleStorage(COLS)` |
+| Google Sheets | `GOOGLE_SHEET_ID` + `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` | `lib/csv.js` reads/writes spreadsheet tabs instead of files, through a per-instance row cache that expires after `SHEETS_CACHE_MS` (default 3 s) |
+
+The cache **must** expire. Vercel runs several instances at once, each with its own copy;
+a cache that never refreshed was why a message sent through one instance stayed invisible
+on the others until they were recycled. A refresh is a single `batchGet`, so the cost is
+one Sheets read per window per instance no matter how often clients poll.
+
+Writes are queued, not awaited by handlers — but a serverless instance is frozen the
+instant the response is sent, so `server.js` wraps `res.json` on `/api` and holds the
+response until `flushGoogleWrites()` and any `background()` work (pushes) have settled,
+capped at 4 s. **Anything started by a handler must go through `background()`**, or the
+host may kill it mid-flight.
 
 Both are transparent to callers: `readCsv`/`writeCsv`/`appendCsv` and `mediaUrl()` handle
 either shape. Code that touches an upload must accept **both** a bare filename and a
@@ -429,8 +440,10 @@ Keep all of these:
 - The VAPID subject falls back through `VAPID_SUBJECT` → admin email → first member email
   → `RENDER_EXTERNAL_URL`. Reserved domains (`example.com`, `.local`, …) are rejected
   because Apple returns `403 BadJwtToken` for them.
-- `notifyOthers(senderEmail, payload)` is fire-and-forget. A slow or dead push service
-  must never delay the message the user just sent. `404`/`410` responses delete the row.
+- `notifyOthers(senderEmail, payload)` is not awaited by the handler — a slow or dead push
+  service must never fail the message the user just sent — but it is registered with
+  `background()` so the response settles it before the instance can be frozen.
+  `404`/`410` responses delete the row.
 - `public/sw.js` is what actually shows the notification. It is the only path iOS
   accepts, and the only one that works with the app closed. On iOS the app must be added
   to the Home Screen before notifications exist at all — `chatlive.js` says so explicitly
