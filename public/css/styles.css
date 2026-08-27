@@ -436,8 +436,12 @@ select {
 .bubble .who { font-size: 11px; color: var(--primary); font-weight: 700; margin-bottom: 2px; }
 .bubble.mine .who { color: rgba(255,255,255,.9); }
 .bubble .reply-ctx { font-size: 11px; opacity: .85; border-left: 2px solid currentColor; padding-left: 7px; margin-bottom: 4px; }
-.bubble .txt { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.bubble .txt {
+  min-width: 0; max-width: 100%; overflow: hidden;
+  font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+}
 .bubble .chat-link {
+  display: block; max-width: 100%; white-space: normal;
   text-decoration: underline;
   overflow-wrap: anywhere;
   word-break: break-all;

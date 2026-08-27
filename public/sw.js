@@ -9,7 +9,7 @@
 
    Caching is deliberately network-first: every screen reads live CSV data, so a stale
    cache would be worse than a slow load. The cache is purely an offline fallback. */
-const CACHE = 'daf-shell-v4';
+const CACHE = 'daf-shell-v5';
 const SHELL = [
   '/index.html',
   '/css/styles.css',
