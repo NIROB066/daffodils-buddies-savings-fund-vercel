@@ -943,4 +943,48 @@ video.chat-media { max-height: 280px; width: 100%; background: #000; }
   .stat, .card, .btn, .mate, .chipnav button, .icon-btn { transition: none; }
 }
 
+/* Phone readability and viewport fit. Keep every mobile surface inside the viewport. */
+@media (max-width: 720px) {
+  html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
+  .topbar, .hero, .layout { width: 100%; max-width: 100%; }
+  .layout { padding-left: 12px; padding-right: 12px; }
+  .main-col, .side-col, .section, .social { width: 100%; max-width: 100%; }
+
+  .brand { gap: 9px; }
+  .brand .b-title { font-size: 17px; }
+  .brand .b-sub { font-size: 12px; }
+  .hero h1 { font-size: clamp(27px, 7.2vw, 34px); }
+  .hero p { font-size: 16px; line-height: 1.45; }
+  .hero-crew .crew-note { font-size: 14px; }
+
+  .sec-title { font-size: 19px; }
+  .sec-desc { font-size: 14px; }
+  .card, .stat { padding: 16px; }
+  .card h3 { font-size: 17px; }
+  .sub, .empty { font-size: 14px; }
+  .stat .k { font-size: 13px; }
+  .stat .v { font-size: 30px; }
+  .stat .s { font-size: 13px; }
+  .result-card .rk { font-size: 13px; }
+  .result-card .rs { font-size: 14px; }
+  .row, .mate .who { font-size: 15px; }
+  .table { font-size: 14px; }
+  .table th { font-size: 12px; }
+  .rule .rl { font-size: 14px; }
+  .rule .rv { font-size: 17px; }
+  .step .st { font-size: 15px; }
+  .step .ss { font-size: 13px; }
+
+  .social-head { padding-left: 14px; padding-right: 14px; }
+  .seg button { font-size: 14px; padding: 10px 5px; }
+  .pane-body, .chat-body { padding-left: 14px; padding-right: 14px; }
+  .bubble .who, .bubble .reply-ctx { font-size: 12px; }
+  .bubble .txt, .feed-post .body { font-size: 15px; line-height: 1.5; }
+  .bubble .stamp, .bubble .rbtn { font-size: 11px; }
+  .ios-hint p { font-size: 14px; }
+  input, select, textarea { font-size: 16px; }
+  .btn { font-size: 15px; }
+  .bottom-nav button { font-size: 11px; }
+}
+
 
