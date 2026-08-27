@@ -976,8 +976,18 @@ video.chat-media { max-height: 280px; width: 100%; background: #000; }
   .step .ss { font-size: 13px; }
 
   .social-head { padding-left: 14px; padding-right: 14px; }
-  .seg button { font-size: 14px; padding: 10px 5px; }
+  .social, .social-head, .pane, .pane-body, .chat-body, .chat-compose, .composer {
+    min-width: 0; max-width: 100%;
+  }
+  .social { overflow-x: hidden; }
+  .seg { width: 100%; min-width: 0; }
+  .seg button {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 14px; padding: 10px 5px;
+  }
   .pane-body, .chat-body { padding-left: 14px; padding-right: 14px; }
+  .slides, .slider, .slide, .chat-dock { max-width: 100%; }
+  .slide img, .feed-post img, .chat-media, .url-preview, .file-card { max-width: 100%; }
   .bubble .who, .bubble .reply-ctx { font-size: 12px; }
   .bubble .txt, .feed-post .body { font-size: 15px; line-height: 1.5; }
   .bubble .stamp, .bubble .rbtn { font-size: 11px; }
