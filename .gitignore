@@ -1,0 +1,45 @@
+# ---- dependencies & logs ----
+node_modules/
+npm-debug.log*
+yarn-error.log*
+*.log
+
+# ---- OS / editor junk ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ---- secrets ----
+# Never commit environment files. Credentials live only in data/login.csv.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Push signing keys + per-device push addresses — generated at runtime, never shared.
+data/vapid.json
+data/push_subs.csv
+
+# ---- planning / design material (local only, not part of the app) ----
+project-idea.txt
+enhancement-idea.txt
+*-idea.txt
+*-ideas.txt
+notes.md
+TODO.md
+# Personal hosting cheat-sheet (domain, tunnel and PM2 notes for this machine).
+Summary.md
+Sample Design/
+Sample Data/
+
+# ---- source spreadsheets (seed input, not needed to run the app) ----
+*.xlsx
+*.xls
+~$*
+
+# ---- user-uploaded content ----
+# Keep the folder, ignore everything users put in it.
+data/uploads/*
+!data/uploads/.gitkeep

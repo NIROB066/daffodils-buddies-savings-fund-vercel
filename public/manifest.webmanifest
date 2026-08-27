@@ -1,0 +1,17 @@
+{
+  "name": "Daffodils Buddies Savings Fund",
+  "short_name": "Daffodils",
+  "description": "Our monthly savings fund — invests, loans, donations, rules and our corner.",
+  "start_url": "/index.html",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#e9eef2",
+  "theme_color": "#16a34a",
+  "lang": "en",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

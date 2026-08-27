@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
+  <title>Daffodils Buddies Fund</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌼</text></svg>" />
+  <!-- Installable app: required before iPhone will deliver chat notifications. -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#16a34a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Daffodils" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <!-- Set theme before paint to avoid a flash. -->
+  <script>try{var t=localStorage.getItem('daf_theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo-chip">🌼</span>
+      <div>
+        <div class="b-title">Daffodils Buddies</div>
+        <div class="b-sub">Savings Fund · BDT ৳</div>
+      </div>
+    </div>
+    <span class="spacer"></span>
+    <span class="by-line">For the sake of ALLAH 💚</span>
+    <button class="icon-btn" id="notify-toggle" title="Turn on new-message notifications" data-ico="bell"></button>
+    <button class="icon-btn" id="theme-toggle" title="Toggle day / night" data-ico="moon"></button>
+    <div class="user-chip" id="user-chip">
+      <span class="uname" id="chip-name">—</span>
+      <span class="avatar" id="chip-avatar">?</span>
+    </div>
+  </header>
+  <div class="menu hidden" id="user-menu">
+    <button id="menu-logout"><span data-ico="logout"></span> Log out</button>
+  </div>
+
+  <!-- iPhone can only deliver chat notifications to a Home Screen app, never a browser tab. -->
+  <div class="ios-hint" id="ios-install-hint" hidden>
+    <span class="ios-hint-ico">🔔</span>
+    <p>Want chat alerts on your iPhone? Tap <strong>Share</strong> → <strong>Add to Home
+      Screen</strong>, open Daffodils from there, then tap the bell.</p>
+    <button class="ios-hint-x" id="ios-hint-close" aria-label="Dismiss">✕</button>
+  </div>
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>Our Buddies Savings Fund</h1>
+    <p>Save together every month, help each other in need, and share the journey. 🌼</p>
+    <div class="hero-crew" id="hero-crew"></div>
+  </div>
+
+  <!-- Desktop quick-jump -->
+  <nav class="chipnav" id="chipnav"></nav>
+
+  <main id="main">
+    <div class="layout">
+      <!-- LEFT: fund data -->
+      <div class="main-col">
+
+        <!-- Our memories — wide slider banner -->
+        <div class="slider wide" id="photo-slider"></div>
+
+        <section class="section" data-key="overview">
+          <div class="sec-head">
+            <span class="sec-icon" data-ico="heart"></span>
+            <div><h2 class="sec-title">Overview</h2><p class="sec-desc">Our fund at a glance</p></div>
+          </div>
+          <div id="loan-banner" style="margin-bottom:14px"></div>
+          <div class="grid" id="overview-cards"></div>
+        </section>
+
+        <section class="section" data-key="invest">
+          <div class="sec-head">
+            <span class="sec-icon" data-ico="wallet"></span>
+            <div><h2 class="sec-title">Investments</h2><p class="sec-desc">Who saves how much, monthly &amp; yearly</p></div>
+          </div>
+          <div class="grid" id="invest-cards"></div>
+          <div class="card" style="margin-top:14px">
+            <div class="sec-head" style="margin-bottom:10px"><span class="sec-icon sky" data-ico="wallet"></span><div><h2 class="sec-title" style="font-size:15px">Recent contributions</h2></div></div>
+            <div id="invest-table"></div>
+          </div>
+        </section>
+
+        <section class="section" data-key="loans">
+          <div class="sec-head">
+            <span class="sec-icon amber" data-ico="hands"></span>
+            <div><h2 class="sec-title">Loans</h2><p class="sec-desc">Borrow in need, return within 3 months</p></div>
+          </div>
+          <div class="grid" id="loan-cards"></div>
+          <div class="card" style="margin-top:14px">
+            <div class="sec-head" style="margin-bottom:10px"><span class="sec-icon amber" data-ico="scroll"></span><div><h2 class="sec-title" style="font-size:15px">Loan history</h2></div></div>
+            <div id="loan-table"></div>
+          </div>
+        </section>
+
+        <section class="section" data-key="donations">
+          <div class="sec-head">
+            <span class="sec-icon violet" data-ico="gift"></span>
+            <div><h2 class="sec-title">Donations</h2><p class="sec-desc">Giving for good — may Allah accept 🤲</p></div>
+          </div>
+          <div class="grid" id="donation-cards"></div>
+          <div class="card" style="margin-top:14px">
+            <div class="sec-head" style="margin-bottom:10px"><span class="sec-icon violet" data-ico="scroll"></span><div><h2 class="sec-title" style="font-size:15px">Donation history</h2></div></div>
+            <div id="donation-table"></div>
+          </div>
+        </section>
+
+        <section class="section" data-key="rules">
+          <div class="sec-head">
+            <span class="sec-icon sky" data-ico="scroll"></span>
+            <div><h2 class="sec-title">Our Rules</h2><p class="sec-desc">Decided by our votes</p></div>
+          </div>
+          <div id="rules-banner"></div>
+          <div class="card" style="margin-top:14px"><div id="rules-list"></div></div>
+        </section>
+
+        <section class="section" data-key="admin" id="admin-section">
+          <div class="sec-head">
+            <span class="sec-icon coral" data-ico="tool"></span>
+            <div><h2 class="sec-title">Admin</h2><p class="sec-desc">Manage the fund</p></div>
+          </div>
+          <div id="admin-content"></div>
+        </section>
+      </div>
+
+      <!-- RIGHT: social panel (memories + chat + posts) -->
+      <div class="side-col">
+        <section class="section social" data-key="community">
+          <div class="social-head">
+            <div class="sec-head">
+              <span class="sec-icon" data-ico="flower"></span>
+              <div><h2 class="sec-title">Our Corner</h2><p class="sec-desc">Chat &amp; memories</p></div>
+            </div>
+            <div class="seg" id="social-seg">
+              <button data-pane="chat" class="active"><span data-ico="message"></span> Chat<span class="live-dot"></span></button>
+              <button data-pane="memories"><span data-ico="image"></span> Memories</button>
+              <button data-pane="posts"><span data-ico="edit"></span> Posts</button>
+            </div>
+          </div>
+
+          <!-- Chat -->
+          <div class="pane active" id="pane-chat">
+            <div class="chat-body" id="chat-box"></div>
+            <div class="reply-banner" id="reply-banner">
+              <span id="reply-text"></span><span class="x" id="reply-cancel" data-ico="x"></span>
+            </div>
+            <div class="chat-attach" id="chat-attach"></div>
+            <div class="chat-compose">
+              <div class="mention-pop" id="mention-pop"></div>
+              <div class="attach-row">
+                <button class="attach-btn" id="attach-photo" title="Send a photo" data-ico="camera"></button>
+                <button class="attach-btn" id="attach-audio" title="Record a voice message" data-ico="mic"></button>
+                <button class="attach-btn" id="attach-video" title="Record a video" data-ico="video"></button>
+                <button class="attach-btn" id="attach-file" title="Attach a file" data-ico="clip"></button>
+                <button class="attach-btn" id="mention-btn" title="Mention a buddy" data-ico="at"></button>
+              </div>
+              <textarea id="chat-text" placeholder="Message the buddies... use @ to mention"></textarea>
+              <button class="btn small icon-only" id="chat-send" title="Send" data-ico="send"></button>
+            </div>
+            <input type="file" id="chat-media-file" hidden />
+          </div>
+
+          <!-- Memories -->
+          <div class="pane" id="pane-memories">
+            <div class="pane-body">
+              <p class="sub" style="margin:0 0 10px">Your uploads show up in the big slider at the top. ✨</p>
+              <div class="uploader">
+                <input type="file" id="photo-file" accept="image/*" />
+                <input type="text" id="photo-cap" placeholder="Add a caption (optional)" />
+                <button class="btn small block" id="photo-upload"><span data-ico="upload"></span> Upload photo</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Posts -->
+          <div class="pane" id="pane-posts">
+            <div class="pane-body" id="posts-feed"></div>
+            <div class="composer">
+              <textarea id="post-text" placeholder="Share something with the buddies..."></textarea>
+              <button class="btn small block" id="post-send"><span data-ico="edit"></span> Post</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <!-- Mobile nav -->
+  <nav class="bottom-nav" id="bottom-nav"></nav>
+  <button class="next-fab" id="next-fab" title="Next">›</button>
+
+  <!-- Minimized chat (phones): follows you across every page -->
+  <button class="chat-fab" id="chat-fab" title="Open chat" hidden>
+    <span class="cf-ic" data-ico="message"></span>
+    <span class="live-dot"></span>
+    <span class="cf-badge" id="chat-fab-badge" hidden>0</span>
+  </button>
+  <div class="dock-scrim" id="dock-scrim" hidden></div>
+  <div class="chat-dock" id="chat-dock" hidden>
+    <div class="dock-head">
+      <span class="dh-title"><span class="live-dot on"></span> Buddies chat</span>
+      <button class="dock-close" id="dock-close" title="Minimize" data-ico="chevron"></button>
+    </div>
+    <div class="dock-body" id="dock-body"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/api.js"></script>
+  <script src="js/icons.js"></script>
+  <script src="js/nav.js"></script>
+  <script src="js/dashboard.js"></script>
+  <script src="js/rules.js"></script>
+  <script src="js/community.js"></script>
+  <script src="js/chatlive.js"></script>
+  <script src="js/admin.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

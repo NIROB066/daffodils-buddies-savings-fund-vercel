@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
+  <title>Daffodils Buddies Fund — Login</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌼</text></svg>" />
+  <script>try{var t=localStorage.getItem('daf_theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-top">
+        <div class="brand">
+          <span class="logo-chip">🌼</span>
+          <div>
+            <div class="b-title">Daffodils Buddies</div>
+            <div class="b-sub">Savings Fund</div>
+          </div>
+        </div>
+        <button class="icon-btn" id="theme-toggle" title="Toggle day / night" data-ico="moon"></button>
+      </div>
+      <p class="sub" style="margin:0 0 22px">For the sake of ALLAH — save together, help each other. 💚</p>
+
+      <!-- Step 1: email -->
+      <div id="step-email">
+        <div class="field">
+          <label>Email <span style="opacity:.7">(or admin username)</span></label>
+          <input id="email" type="text" placeholder="you@example.com" autocomplete="username" />
+        </div>
+        <button class="btn block" id="btn-continue">Continue</button>
+        <div class="link-row"><a id="to-forgot">Forgot password?</a></div>
+      </div>
+
+      <!-- Step 2: password -->
+      <div id="step-password" class="hidden">
+        <div class="field">
+          <label id="pw-label">Password</label>
+          <input id="password" type="password" placeholder="Your password" autocomplete="current-password" />
+        </div>
+        <button class="btn block" id="btn-login">Log in</button>
+        <div class="link-row"><a id="back-1">← Use a different email</a></div>
+      </div>
+
+      <!-- Step 3: forgot -->
+      <div id="step-forgot" class="hidden">
+        <div class="field">
+          <label>Email</label>
+          <input id="f-email" type="text" placeholder="you@example.com" />
+        </div>
+        <button class="btn block" id="btn-forgot">Request a reset</button>
+        <p class="sub" style="margin-top:12px">Nobody can see your password — not even the admin. Once they approve the reset, log back in and choose a new one.</p>
+        <div class="link-row"><a id="back-2">← Back to login</a></div>
+      </div>
+
+      <div id="msg" class="msg"></div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/icons.js"></script>
+  <script>
+    // Theme toggle on the login page.
+    (function () {
+      var btn = document.getElementById('theme-toggle');
+      function sync() { btn.innerHTML = ICON[document.documentElement.getAttribute('data-theme') === 'dark' ? 'sun' : 'moon']; }
+      sync();
+      btn.addEventListener('click', function () {
+        var t = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+        try { localStorage.setItem('daf_theme', t); } catch (e) {}
+        sync();
+      });
+    })();
+  </script>
+  <script src="js/auth.js"></script>
+</body>
+</html>

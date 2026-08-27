@@ -1,0 +1,15 @@
+rule_key,label,Nirob,Yen,Riyad,Nasif
+bank,Bank selection,CITY ISLAMIC,CITY ISLAMIC,CITY ISLAMIC,BRAC BANK
+fund_amount,Fund amount / month (per person),250.0,250.0,250.0,250.0
+account_holders,Account holders,"Riyad, but others will have credentials","Riyad, but others will have credentials","Nirob, but others will have credentials",
+nominee,Nominee policy,"Others Except account holder, Decision of the indivisual (You/Spouse)",Decision of the indivisual (You/Spouse),Decision of the indivisual (You/Spouse),
+loan_max_at_once,How much loan can be taken at a time,50% of account balance,50% of account balance,50% of account balance,50% of account balance
+loan_min_balance,Minimum account balance that must remain,5000.0,20% of the main balace,20% of the main balace,20% of the Main Balance
+loan_for_whom,For whom loans can be taken,"Myself, Spouse, Parents, Children","Myself, Spouse, Parents","Myself, Spouse, Parents, Children","Myself, Spouse, Parents"
+loan_situations,Valid situations for a loan application,"Major operation, loan/EMI endengering INTEREST, Lost costly asset, End of the month crisis, Delayed salary, Lost the job/accident","Lost Job/accident, loan/EMI endengering INTEREST, Delayed Salary","Islamic activism (5-10%) , Medical Emergency , Developing asset, Delayed salary, Lost the job/accident","loan/EMI endengering INTEREST, Lost costly asset, Delayed Salary, Lost Job/accident, End of month crisis, Medical Emergency"
+loan_max_time,Maximum time to return a loan,3 month,3 month,3 month,3 month
+gift_amount,How much can be gifted,Maximum 50% of the account balance,Maximum 25% of the account balance,Maximum 25% of the account balance,Maximum 50% of the account balance
+gift_occasion,Gift to one of us on an occasion,Yes but others must agree,No,No,Yes
+gift_crisis,Gifting on a serious crisis / accident,Yes but others must agree,Yes but others must agree,Yes but others must agree,Yes
+donation_national,Donation amount on a national crisis,100% if situation demands,Maximum 50%,Maximum 25%,Maximum 75%
+donation_org,Organization selection for a national-crisis donation,At least 3 of us must agree,At least 3 of us must agree,All of us must agree,At least 3 of us must agree
