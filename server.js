@@ -13,7 +13,7 @@ const dns = require('dns').promises;
 const express = require('express');
 const multer = require('multer');
 
-const { readCsv, writeCsv, appendCsv, initGoogleStorage } = require('./lib/csv');
+const { readCsv, writeCsv, appendCsv, initGoogleStorage, flushGoogleWrites } = require('./lib/csv');
 const googleStorage = require('./lib/google-storage');
 const blobStorage = require('./lib/blob-storage');
 const { DATA, UPLOADS, PERSISTENT, file, bootstrap } = require('./lib/paths');
@@ -112,9 +112,33 @@ const storageReady = googleStorage.configured()
   ? () => initGoogleStorage(COLS).then(migrateChat)
   : (() => { const done = Promise.resolve(migrateChat()); return () => done; })();
 
+/**
+ * Background work started by a handler — a Sheets write, a push. A serverless instance is
+ * frozen the instant the response is sent, so anything still in flight there simply never
+ * happens: the message never reaches the spreadsheet, the notification is never delivered.
+ * Handlers stay fire-and-forget; `settle()` below holds the response until they're done.
+ */
+const inFlight = new Set();
+function background(promise) {
+  const task = Promise.resolve(promise).catch(() => {}).finally(() => inFlight.delete(task));
+  inFlight.add(task);
+  return task;
+}
+
+// A dead push service must still not stall the sender — cap the wait rather than drop it.
+const SETTLE_MS = 4000;
+function settle() {
+  const work = Promise.all([flushGoogleWrites(), ...inFlight]);
+  return Promise.race([work, new Promise((done) => setTimeout(done, SETTLE_MS))]).catch(() => {});
+}
+
 // Never cache a storage failure: initGoogleStorage retries on the next request, so a
 // transient Sheets hiccup costs one error instead of bricking the whole instance.
 app.use('/api', async (_req, res, next) => {
+  // Chat polls read fresh state every few seconds; a cached answer is always the wrong one.
+  res.set('Cache-Control', 'no-store');
+  const send = res.json.bind(res);
+  res.json = (body) => { settle().then(() => send(body)); return res; };
   try {
     await storageReady();
     next();
@@ -490,16 +514,17 @@ function mentionedNames(text) {
 }
 
 /**
- * Wake everyone else's phone. Deliberately not awaited: a push service being slow or down
- * must never delay (or fail) the message the user just sent.
+ * Wake everyone else's phone. Not awaited by the handler — a push service being slow or
+ * down must never fail the message the user just sent — but registered as background work
+ * so the response waits for it instead of the host freezing it mid-flight.
  */
 function pushChat(sender, msg) {
-  push.notifyOthers(sender.email, {
+  background(push.notifyOthers(sender.email, {
     member: msg.member,
     body: preview(msg),
     mentions: mentionedNames(msg.text),
     url: '/index.html',
-  });
+  }));
 }
 
 app.post('/api/chat', (req, res) => {
@@ -516,8 +541,8 @@ app.post('/api/chat', (req, res) => {
   };
   appendCsv(file('chat'), msg, COLS.chat);
   typingNow.delete(user.email);
-  res.json(shapeMessage(msg));
   pushChat(user, msg);
+  res.json(shapeMessage(msg));
 });
 
 /** Find a message by id, or answer 404. Returns `[rows, message]` when it exists. */
@@ -683,8 +708,8 @@ app.post('/api/chat/media', chatMedia.single('media'), uploadToBlob, (req, res) 
   };
   appendCsv(file('chat'), msg, COLS.chat);
   typingNow.delete(user.email);
-  res.json(shapeMessage(msg));
   pushChat(user, msg);
+  res.json(shapeMessage(msg));
 });
 
 app.post('/api/photos', upload.single('photo'), uploadToBlob, (req, res) => {

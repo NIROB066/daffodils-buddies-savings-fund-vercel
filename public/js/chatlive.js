@@ -362,7 +362,9 @@ const ChatLive = (function () {
     window.addEventListener('resize', syncFab);
     document.addEventListener('visibilitychange', () => {
       schedule();
-      if (chatVisible()) markRead(); else poll();
+      // Coming back should show the thread as it is now, not as it was up to a tick ago.
+      if (!document.hidden) poll();
+      if (chatVisible()) markRead();
     });
 
     // Count what arrived while we were away, then start polling.
