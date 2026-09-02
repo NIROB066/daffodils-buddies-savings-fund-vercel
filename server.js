@@ -364,6 +364,7 @@ app.post('/api/posts', (req, res) => {
     image: image || '', timestamp: new Date().toISOString(),
   };
   appendCsv(file('posts'), post, COLS.posts);
+  pushPost(user, post);
   res.json(post);
 });
 
@@ -477,6 +478,12 @@ app.post('/api/chat/seen', (req, res) => {
   res.json({ ok: true });
 });
 
+function postsRevision() {
+  const posts = readCsv(file('posts'));
+  const last = posts[posts.length - 1];
+  return `${posts.length}:${last ? last.id : '0'}`;
+}
+
 /**
  * One round-trip for the live poll: new messages, plus the presence bits, plus the
  * revision. If the caller's revision is stale we return `full` instead of `messages` so
@@ -491,6 +498,7 @@ app.get('/api/chat/live', (req, res) => {
   const all = rows.map(shapeMessage);
   res.json({
     rev,
+    postsRev: postsRevision(),
     full: stale ? all : null,
     messages: stale || isNaN(since) ? [] : all.filter((m) => (parseInt(m.id, 10) || 0) > since),
     typing: typingNames(user ? user.email : ''),
@@ -519,10 +527,46 @@ function mentionedNames(text) {
  * so the response waits for it instead of the host freezing it mid-flight.
  */
 function pushChat(sender, msg) {
+  const isAll = /@all(?![\w])/i.test(msg.text || '');
   background(push.notifyOthers(sender.email, {
+    type: 'chat',
     member: msg.member,
     body: preview(msg),
+    rawText: msg.text || '',
     mentions: mentionedNames(msg.text),
+    isAll,
+    url: '/index.html',
+  }));
+}
+
+function pushPost(sender, post) {
+  const isAll = /@all(?![\w])/i.test(post.text || '');
+  const bodyPreview = post.text
+    ? (post.text.length > 120 ? post.text.slice(0, 117) + '...' : post.text)
+    : (post.image ? '📷 Shared a photo' : 'New post');
+  background(push.notifyOthers(sender.email, {
+    type: 'post',
+    member: post.member,
+    body: bodyPreview,
+    rawText: post.text || '',
+    mentions: mentionedNames(post.text),
+    isAll,
+    url: '/index.html',
+  }));
+}
+
+function pushPhoto(sender, photo) {
+  const isAll = /@all(?![\w])/i.test(photo.caption || '');
+  const bodyPreview = photo.caption
+    ? (photo.caption.length > 120 ? photo.caption.slice(0, 117) + '...' : photo.caption)
+    : 'Added a new memory photo 📸';
+  background(push.notifyOthers(sender.email, {
+    type: 'photo',
+    member: photo.member,
+    body: bodyPreview,
+    rawText: photo.caption || '',
+    mentions: mentionedNames(photo.caption),
+    isAll,
     url: '/index.html',
   }));
 }
@@ -722,6 +766,7 @@ app.post('/api/photos', upload.single('photo'), uploadToBlob, (req, res) => {
     caption: (req.body && req.body.caption) || '', timestamp: new Date().toISOString(),
   };
   appendCsv(file('photos'), photo, COLS.photos);
+  pushPhoto(user, photo);
   res.json({ ...photo, url: blobStorage.configured() ? photo.filename : `/uploads/${photo.filename}` });
 });
 
@@ -733,8 +778,10 @@ app.post('/api/posts/photo', upload.single('photo'), uploadToBlob, (req, res) =>
   const post = {
     id: nextId(rows), member: user.name, text: (req.body && req.body.text) || '',
     image: req.file ? (blobStorage.configured() ? req.file.filename : `/uploads/${req.file.filename}`) : '',
+    timestamp: new Date().toISOString(),
   };
   appendCsv(file('posts'), post, COLS.posts);
+  pushPost(user, post);
   res.json(post);
 });
 

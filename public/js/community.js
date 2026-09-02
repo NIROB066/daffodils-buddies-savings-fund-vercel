@@ -78,7 +78,7 @@ const Community = (function () {
           <span class="avatar-sm" style="background:${avatarColor(p.member)}">${initials(p.member)}</span>
           <div><div class="who">${esc(p.member)}</div><div class="when">${fmtTime(p.timestamp)}</div></div>
         </div>
-        ${p.text ? `<div class="body">${esc(p.text)}</div>` : ''}
+        ${p.text ? `<div class="body">${linkMentions(linkUrls(esc(p.text)))}</div>` : ''}
         ${p.image ? `<img src="${esc(p.image)}" alt="post image" loading="lazy" />` : ''}
       </div>`).join('');
   }
@@ -617,15 +617,20 @@ const Community = (function () {
   }
 
   /* ---- @mention autocomplete ---- */
-  let mentionMatches = [], mentionIdx = 0, mentionStart = -1;
+  let mentionMatches = [], mentionIdx = 0, mentionStart = -1, mentionTarget = null;
 
   function closeMentions() {
-    mentionMatches = []; mentionStart = -1;
-    document.getElementById('mention-pop').classList.remove('show');
+    mentionMatches = []; mentionStart = -1; mentionTarget = null;
+    const p1 = document.getElementById('mention-pop');
+    if (p1) p1.classList.remove('show');
+    const p2 = document.getElementById('post-mention-pop');
+    if (p2) p2.classList.remove('show');
   }
 
-  function updateMentions() {
-    const ta = document.getElementById('chat-text');
+  function updateMentions(el) {
+    const ta = el || document.getElementById('chat-text');
+    if (!ta) return closeMentions();
+    mentionTarget = ta;
     const before = ta.value.slice(0, ta.selectionStart);
     const hit = before.match(/(^|\s)@([\p{L}\w]*)$/u);
     if (!hit) return closeMentions();
@@ -636,11 +641,14 @@ const Community = (function () {
 
     mentionStart = before.length - hit[2].length - 1; // index of the '@'
     mentionIdx = 0;
-    renderMentions();
+    renderMentions(ta);
   }
 
-  function renderMentions() {
-    const pop = document.getElementById('mention-pop');
+  function renderMentions(ta) {
+    const pop = (ta && ta.id === 'post-text')
+      ? document.getElementById('post-mention-pop')
+      : document.getElementById('mention-pop');
+    if (!pop) return;
     pop.innerHTML = mentionMatches.map((n, i) => `
       <button type="button" class="${i === mentionIdx ? 'on' : ''}" data-name="${esc(n)}">
         <span class="avatar-sm" style="background:${avatarColor(n)}">${initials(n)}</span>${esc(n)}
@@ -651,7 +659,8 @@ const Community = (function () {
   }
 
   function pickMention(name) {
-    const ta = document.getElementById('chat-text');
+    const ta = mentionTarget || document.getElementById('chat-text');
+    if (!ta) return closeMentions();
     const caret = ta.selectionStart;
     ta.value = ta.value.slice(0, mentionStart) + `@${name} ` + ta.value.slice(caret);
     const pos = mentionStart + name.length + 2;
@@ -664,8 +673,8 @@ const Community = (function () {
   /** Returns true if the keystroke was consumed by the mention popup. */
   function mentionKey(e) {
     if (!mentionMatches.length) return false;
-    if (e.key === 'ArrowDown') { mentionIdx = (mentionIdx + 1) % mentionMatches.length; renderMentions(); return true; }
-    if (e.key === 'ArrowUp') { mentionIdx = (mentionIdx - 1 + mentionMatches.length) % mentionMatches.length; renderMentions(); return true; }
+    if (e.key === 'ArrowDown') { mentionIdx = (mentionIdx + 1) % mentionMatches.length; renderMentions(mentionTarget); return true; }
+    if (e.key === 'ArrowUp') { mentionIdx = (mentionIdx - 1 + mentionMatches.length) % mentionMatches.length; renderMentions(mentionTarget); return true; }
     if (e.key === 'Enter' || e.key === 'Tab') { pickMention(mentionMatches[mentionIdx]); return true; }
     if (e.key === 'Escape') { closeMentions(); return true; }
     return false;
@@ -728,17 +737,27 @@ const Community = (function () {
     document.getElementById('edit-cancel').addEventListener('click', cancelEdit);
 
     const ta = document.getElementById('chat-text');
-    ta.addEventListener('input', () => { updateMentions(); autoGrow(ta); if (ta.value.trim()) pingTyping(); });
+    ta.addEventListener('input', () => { updateMentions(ta); autoGrow(ta); if (ta.value.trim()) pingTyping(); });
     ta.addEventListener('blur', () => setTimeout(closeMentions, 120));
     ta.addEventListener('keydown', (e) => {
       if (mentionKey(e)) { e.preventDefault(); return; }
       if (e.key === 'Escape' && editingId) { e.preventDefault(); return cancelEdit(); }
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); sendChat(); }
     });
     document.getElementById('mention-btn').addEventListener('click', () => {
       insertAtCaret('@');
-      updateMentions();
+      updateMentions(ta);
     });
+
+    const postTa = document.getElementById('post-text');
+    if (postTa) {
+      postTa.addEventListener('input', () => { updateMentions(postTa); autoGrow(postTa); });
+      postTa.addEventListener('blur', () => setTimeout(closeMentions, 120));
+      postTa.addEventListener('keydown', (e) => {
+        if (mentionKey(e)) { e.preventDefault(); return; }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); sendPost(); }
+      });
+    }
 
     bindEmoji();
     bindChatBox();
@@ -1116,8 +1135,15 @@ const Community = (function () {
 
   const lastId = () => chat.reduce((max, m) => Math.max(max, parseInt(m.id, 10) || 0), 0);
 
+  async function reloadPosts() {
+    try {
+      posts = await api('/posts');
+      renderPosts();
+    } catch {}
+  }
+
   return {
     load, bind, renderChat, applyIncoming, replaceAll, lastId, scrollToBottom,
-    mentionsMe, setTyping, setReceipts,
+    mentionsMe, setTyping, setReceipts, reloadPosts,
   };
 })();

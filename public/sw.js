@@ -9,7 +9,7 @@
 
    Caching is deliberately network-first: every screen reads live CSV data, so a stale
    cache would be worse than a slow load. The cache is purely an offline fallback. */
-const CACHE = 'daf-shell-v5';
+const CACHE = 'daf-shell-v6';
 const SHELL = [
   '/index.html',
   '/css/styles.css',
@@ -70,25 +70,28 @@ async function appIsVisible() {
 // So on iPhone/iPad we always show, and only other platforms get the quiet-while-open nicety.
 const IS_IOS = /iP(hone|ad|od)/.test(self.navigator.userAgent);
 
-/** A new chat message arrived while the app was closed (or in the background). */
+/** A new message, post, or memory arrived while the app was closed (or in the background). */
 self.addEventListener('push', (e) => {
   let data = {};
   try { data = e.data ? e.data.json() : {}; } catch { /* malformed — fall back to defaults */ }
 
   const who = data.member || 'Buddies';
-  const mentioned = Array.isArray(data.mentions) && data.mentions.length;
-  const title = mentioned ? `${who} mentioned you 💬` : `${who} · Daffodils Buddies`;
+  const mentioned = data.mentioned || (Array.isArray(data.mentions) && data.mentions.length > 0);
+  const title = data.title || (mentioned ? `${who} mentioned you 💬` : `${who} · Daffodils Buddies`);
+  const tag = data.tag || (data.type === 'post' ? 'daf-post' : data.type === 'photo' ? 'daf-photo' : 'daf-chat');
 
   e.waitUntil((async () => {
     if (!IS_IOS && await appIsVisible()) return;
     await self.registration.showNotification(title, {
-      body: data.body || 'New message',
+      body: data.body || 'New update',
       icon: '/icons/icon-192.png',
       badge: '/icons/icon-192.png',
-      // Shared with the in-page fallback notification so the two collapse into one.
-      tag: 'daf-chat',
+      tag,
       renotify: true,
-      data: { url: data.url || '/index.html' },
+      data: {
+        url: data.url || '/index.html',
+        type: data.type || 'chat',
+      },
     });
   })());
 });
@@ -117,14 +120,16 @@ self.addEventListener('pushsubscriptionchange', (e) => {
   })());
 });
 
-// Tapping a new-message notification focuses the open app instead of opening a duplicate.
+// Tapping a notification focuses the open app and opens the appropriate tab.
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   const target = (e.notification.data && e.notification.data.url) || '/';
+  const type = (e.notification.data && e.notification.data.type) || 'chat';
+  const msgType = type === 'post' ? 'open-posts' : 'open-chat';
   e.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
       for (const client of list) {
-        if ('focus' in client) { client.postMessage({ type: 'open-chat' }); return client.focus(); }
+        if ('focus' in client) { client.postMessage({ type: msgType }); return client.focus(); }
       }
       return self.clients.openWindow(target);
     })

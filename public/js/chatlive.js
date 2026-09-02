@@ -16,6 +16,7 @@ const ChatLive = (function () {
   let pushOn = false;                       // server can reach this device while it's closed
   let homeParent = null, homeNext = null;   // where #pane-chat lives when docked away
   let rev = '';                             // server's chat fingerprint, see /api/chat/live
+  let postsRev = '';                        // server's posts fingerprint
   let reported = 0;                         // highest id we've told the server we've read
 
   const me = () => (Session.user && Session.user.name) || '';
@@ -227,6 +228,10 @@ const ChatLive = (function () {
     try {
       const state = await api(`/chat/live?since=${Community.lastId()}&rev=${encodeURIComponent(rev)}`);
       rev = state.rev;
+      if (state.postsRev && state.postsRev !== postsRev) {
+        postsRev = state.postsRev;
+        Community.reloadPosts();
+      }
       Community.setTyping(state.typing);
       Community.setReceipts(state.receipts);
 
@@ -329,9 +334,16 @@ const ChatLive = (function () {
           }
         })
         .catch(() => { /* not fatal — notifications fall back to the in-page path */ });
-      // Tapping a notification asks the page to surface the chat.
+      // Tapping a notification asks the page to surface the chat or posts.
       navigator.serviceWorker.addEventListener('message', (e) => {
-        if (!e.data || e.data.type !== 'open-chat') return;
+        if (!e.data) return;
+        if (e.data.type === 'open-posts') {
+          if (Nav.isPhone() && Nav.active !== 'community') Nav.go('community');
+          const tab = document.querySelector('#social-seg button[data-pane="posts"]');
+          if (tab) tab.click();
+          return;
+        }
+        if (e.data.type !== 'open-chat') return;
         if (Nav.isPhone() && Nav.active !== 'community') return openDock();
         const tab = document.querySelector('#social-seg button[data-pane="chat"]');
         if (tab) tab.click();
