@@ -19,6 +19,172 @@ const Community = (function () {
     ? value : `/uploads/${encodeURIComponent(value || '')}`;
   const myName = () => (Session.user && Session.user.name) || '';
 
+  // In-flight upload feedback + the server's hard caps (chat 30 MB, memories 8 MB).
+  let sendingMedia = null;                       // label of the media being sent, or null
+  const MAX_CHAT_MEDIA = 30 * 1024 * 1024;
+  const MAX_MEMORY_PHOTO = 8 * 1024 * 1024;
+  // Vercel's serverless functions refuse request bodies over 4.5 MB (multipart
+  // overhead included), so anything at/above 4 MB rides the direct-to-Blob path.
+  const DIRECT_UPLOAD_MIN = 4 * 1024 * 1024;
+
+  // Vercel's serverless functions refuse request bodies over 4.5 MB, so any video
+  // clip bigger than that used to die with a vague error (multer never even ran).
+  // The browser SDK lets us PUT the bytes straight into Blob storage instead. It is
+  // loaded once, on demand, from a pinned CDN; if that ever fails we fall back to
+  // the classic server upload, which still handles anything under the function cap.
+  const BLOB_CLIENT_URL = 'https://esm.sh/@vercel/blob@2.8.0/client?target=es2020&bundle';
+  let blobClientPromise = null;
+  function loadBlobClient() {
+    if (!blobClientPromise) {
+      blobClientPromise = import(BLOB_CLIENT_URL).catch((error) => {
+        blobClientPromise = null; // transient blip? try again on the next send
+        throw error;
+      });
+    }
+    return blobClientPromise;
+  }
+
+  /** The three bouncing dots reused everywhere a send is in flight. */
+  function dotsHtml(extraClass = '') {
+    return `<span class="typing-dots ${extraClass}"><i></i><i></i><i></i></span>`;
+  }
+
+  /** A "Sending…" bubble pinned to the bottom of the thread while an upload goes up. */
+  function sendingBubbleHtml(label) {
+    return `<div class="bubble mine sending" data-id="pending" aria-busy="true">
+      <div class="txt">${esc(label)}</div>
+      <div class="brow">${dotsHtml()} <span class="stamp">Sending…</span></div>
+    </div>`;
+  }
+
+  /**
+   * Upload a staged chat file. Files at/above 4 MB go straight into Vercel Blob
+   * from the browser (scoped client token + PUT) — the only way to get past the
+   * 4.5 MB serverless-function body cap — then return the Blob URL to the server.
+   * Small files and backends without Blob keep the classic server upload.
+   */
+  async function uploadChatMedia(file, text, replyTo) {
+    const kind = /^image\//.test(file.type) ? 'image'
+      : /^video\//.test(file.type) ? 'video'
+        : /^audio\//.test(file.type) ? 'audio' : 'file';
+
+    let sdk = null;
+    if (file.size >= DIRECT_UPLOAD_MIN || kind === 'video') {
+      try { sdk = await loadBlobClient(); } catch { /* CDN unreachable → classic */ }
+      if (sdk && sdk.put) {
+        try {
+          const meta = await api('/uploads/client-token', {
+            method: 'POST',
+            body: { kind: 'chat', name: file.name, type: file.type || 'application/octet-stream', size: file.size },
+          });
+          const blob = await sdk.put(meta.pathname, file, {
+            access: 'public',
+            token: meta.token,
+            contentType: file.type || 'application/octet-stream',
+          });
+          return await api('/chat/media-url', {
+            method: 'POST',
+            body: {
+              url: blob.url, media_type: kind, media_name: file.name,
+              media_size: file.size, text, reply_to: replyTo || '',
+            },
+          });
+        } catch (error) {
+          // No Blob store on this backend → send it through the server as before.
+          if (error && error.status === 501) { /* fall through to classic */ }
+          else throw error;
+        }
+      }
+    }
+
+    const form = new FormData();
+    form.append('media', file);
+    form.append('text', text);
+    form.append('reply_to', replyTo || '');
+    return await api('/chat/media', { method: 'POST', form });
+  }
+
+  /** Memory photo upload — same direct-to-Blob strategy as chat media. */
+  async function uploadMemoryPhoto(file, caption) {
+    let sdk = null;
+    if (file.size >= DIRECT_UPLOAD_MIN) {
+      try { sdk = await loadBlobClient(); } catch { /* CDN unreachable → classic */ }
+      if (sdk && sdk.put) {
+        try {
+          const meta = await api('/uploads/client-token', {
+            method: 'POST',
+            body: { kind: 'photo', name: file.name, type: file.type || 'application/octet-stream', size: file.size },
+          });
+          const blob = await sdk.put(meta.pathname, file, {
+            access: 'public',
+            token: meta.token,
+            contentType: file.type || 'application/octet-stream',
+          });
+          return await api('/photos-url', { method: 'POST', body: { url: blob.url, caption } });
+        } catch (error) {
+          if (error && error.status === 501) { /* fall through to classic */ }
+          else throw error;
+        }
+      }
+    }
+
+    const form = new FormData();
+    form.append('photo', file);
+    form.append('caption', caption);
+    return await api('/photos', { method: 'POST', form });
+  }
+
+  /** Post image upload — direct-to-Blob on Vercel, multipart elsewhere. */
+  async function uploadPostImage(file, text) {
+    let sdk = null;
+    if (file.size >= DIRECT_UPLOAD_MIN) {
+      try { sdk = await loadBlobClient(); } catch { /* CDN unreachable → classic */ }
+      if (sdk && sdk.put) {
+        try {
+          const meta = await api('/uploads/client-token', {
+            method: 'POST',
+            body: { kind: 'photo', name: file.name, type: file.type || 'application/octet-stream', size: file.size },
+          });
+          const blob = await sdk.put(meta.pathname, file, {
+            access: 'public',
+            token: meta.token,
+            contentType: file.type || 'application/octet-stream',
+          });
+          return await api('/posts/photo-url', { method: 'POST', body: { url: blob.url, text } });
+        } catch (error) {
+          if (error && error.status === 501) { /* fall through to classic */ }
+          else throw error;
+        }
+      }
+    }
+
+    const form = new FormData();
+    form.append('photo', file);
+    form.append('text', text);
+    return await api('/posts/photo', { method: 'POST', form });
+  }
+
+  /** Busy state for a button: bouncing dots + a "Uploading…"-style label, or restore. */
+  function setButtonLoading(btn, busyLabel) {
+    if (!btn) return;
+    if (busyLabel) {
+      if (btn.dataset.restore === undefined) btn.dataset.restore = btn.innerHTML;
+      btn.disabled = true;
+      btn.classList.add('loading');
+      btn.setAttribute('aria-busy', 'true');
+      btn.innerHTML = `<span class="btn-dots"><i></i><i></i><i></i></span> ${esc(busyLabel)}…`;
+    } else {
+      btn.disabled = false;
+      btn.classList.remove('loading');
+      btn.removeAttribute('aria-busy');
+      if (btn.dataset.restore !== undefined) {
+        btn.innerHTML = btn.dataset.restore;
+        delete btn.dataset.restore;
+        hydrateIcons(btn); // the restored <span data-ico> needs its SVG back
+      }
+    }
+  }
+
   async function load() {
     [photos, posts, chat, people] = await Promise.all([
       api('/photos'), api('/posts'), api('/chat'), api('/people').catch(() => []),
@@ -357,7 +523,8 @@ const Community = (function () {
     const byId = Object.fromEntries(chat.map((m) => [String(m.id), m]));
 
     if (!chat.length) {
-      box.innerHTML = '<div class="empty">No messages yet — start the conversation! 💬</div>';
+      box.innerHTML = '<div class="empty">No messages yet — start the conversation! 💬</div>'
+        + (sendingMedia ? sendingBubbleHtml(sendingMedia) : '');
       refreshSearchState();
       return;
     }
@@ -371,7 +538,7 @@ const Community = (function () {
       const sep = day && day !== lastDay ? `<div class="day-sep"><span>${esc(day)}</span></div>` : '';
       lastDay = day || lastDay;
       return sep + bubbleHtml(m, byId);
-    }).join('');
+    }).join('') + (sendingMedia ? sendingBubbleHtml(sendingMedia) : '');
 
     hydratePreviews(box);
     highlightMatches(box);
@@ -732,6 +899,13 @@ const Community = (function () {
   function bind() {
     document.getElementById('photo-upload').addEventListener('click', uploadPhoto);
     document.getElementById('post-send').addEventListener('click', sendPost);
+    document.getElementById('post-photo').addEventListener('change', () => {
+      const file = document.getElementById('post-photo').files[0];
+      if (file && file.size > MAX_MEMORY_PHOTO) {
+        document.getElementById('post-photo').value = '';
+        Toast.show('That image is too big — the limit is 8 MB.', true);
+      }
+    });
     document.getElementById('chat-send').addEventListener('click', sendChat);
     document.getElementById('reply-cancel').addEventListener('click', clearReply);
     document.getElementById('edit-cancel').addEventListener('click', cancelEdit);
@@ -787,7 +961,8 @@ const Community = (function () {
     fileInput.addEventListener('change', () => {
       const f = fileInput.files[0];
       if (!f) { pendingMedia = null; }
-      else { pendingMedia.file = f; }
+      else if (pendingMedia) { pendingMedia.file = f; }
+      else stageFile(f);   // a drop/paste/auto-picked file — classify it ourselves
       renderAttach();
     });
   }
@@ -1022,27 +1197,35 @@ const Community = (function () {
   async function uploadPhoto() {
     const file = document.getElementById('photo-file').files[0];
     if (!file) return Toast.show('Choose an image first.', true);
-    const form = new FormData();
-    form.append('photo', file);
-    form.append('caption', document.getElementById('photo-cap').value);
+    if (file.size > MAX_MEMORY_PHOTO) return Toast.show('That image is too big — the limit is 8 MB.', true);
+    const btn = document.getElementById('photo-upload');
+    setButtonLoading(btn, 'Uploading');
+    const caption = document.getElementById('photo-cap').value;
     try {
-      await api('/photos', { method: 'POST', form });
+      await uploadMemoryPhoto(file, caption);
       document.getElementById('photo-file').value = '';
       document.getElementById('photo-cap').value = '';
       Toast.show('Photo uploaded! 📸');
       await load();
     } catch (e) { Toast.show(e.message, true); }
+    finally { setButtonLoading(btn, null); }
   }
 
   async function sendPost() {
     const text = document.getElementById('post-text').value.trim();
-    if (!text) return Toast.show('Write something to post.', true);
+    const image = document.getElementById('post-photo').files[0];
+    if (!text && !image) return Toast.show('Write something or add a photo.', true);
+    if (image && image.size > MAX_MEMORY_PHOTO) return Toast.show('That image is too big — the limit is 8 MB.', true);
+    const btn = document.getElementById('post-send');
+    setButtonLoading(btn, image ? 'Uploading' : 'Posting');
     try {
-      await api('/posts', { method: 'POST', body: { text } });
+      await (image ? uploadPostImage(image, text) : api('/posts', { method: 'POST', body: { text } }));
       document.getElementById('post-text').value = '';
+      document.getElementById('post-photo').value = '';
       Toast.show('Posted! 🌼');
       posts = await api('/posts'); renderPosts();
     } catch (e) { Toast.show(e.message, true); }
+    finally { setButtonLoading(btn, null); }
   }
 
   async function sendChat() {
@@ -1063,18 +1246,24 @@ const Community = (function () {
     }
 
     if (pendingMedia && pendingMedia.file) {
-      const form = new FormData();
-      form.append('media', pendingMedia.file);
-      form.append('text', text);
-      form.append('reply_to', replyTo || '');
+      const file = pendingMedia.file;
+      if (file.size > MAX_CHAT_MEDIA) return Toast.show('That file is too big — the limit is 30 MB.', true);
+      const label = { image: 'Photo', video: 'Video', audio: 'Voice message', file: 'File' }[pendingMedia.kind] || 'File';
       const btn = document.getElementById('chat-send');
       btn.disabled = true;
+      sendingMedia = `Sending ${label}…`;
+      renderChat();                 // show the bouncing-dots bubble straight away
+      scrollToBottom();
       try {
-        const msg = await api('/chat/media', { method: 'POST', form });
+        const msg = await uploadChatMedia(file, text, replyTo || '');
         ta.value = ''; autoGrow(ta); pendingMedia = null; renderAttach(); clearReply();
+        sendingMedia = null;
         chat.push(msg); renderChat(); scrollToBottom();
-      } catch (e) { Toast.show(e.message, true); }
-      finally { btn.disabled = false; }
+      } catch (e) {
+        sendingMedia = null;
+        renderChat();               // take the stuck "Sending…" bubble away
+        Toast.show(e.message, true);
+      } finally { btn.disabled = false; }
       return;
     }
 

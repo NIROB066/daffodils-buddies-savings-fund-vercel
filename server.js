@@ -735,25 +735,91 @@ function mediaKind(mime) {
   return 'file';
 }
 
-/** Send a chat message carrying a photo / audio / video / file (and optional caption). */
-app.post('/api/chat/media', chatMedia.single('media'), uploadToBlob, (req, res) => {
-  const user = currentUser(req);
-  if (!user) return res.status(401).json({ error: 'Please log in.' });
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+/** Persist one chat row from already-decided fields; shared by the classic file
+ * upload and the direct-to-Blob path (which lands here with the Blob URL). */
+function persistChatMessage(user, fields) {
   const rows = pruneChat();
   const msg = {
     id: nextId(rows), member: user.name,
-    text: (req.body && req.body.text) || '',
-    media: req.file.filename, media_type: mediaKind(req.file.mimetype),
-    media_name: req.file.originalname || req.file.filename,
-    media_size: req.file.size || '',
-    reply_to: (req.body && req.body.reply_to) || '', timestamp: new Date().toISOString(),
+    text: fields.text || '',
+    media: fields.media, media_type: fields.media_type,
+    media_name: fields.media_name || '',
+    media_size: fields.media_size || '',
+    reply_to: fields.reply_to || '', timestamp: new Date().toISOString(),
     reactions: '', deleted: '', edited_at: '',
   };
   appendCsv(file('chat'), msg, COLS.chat);
   typingNow.delete(user.email);
   pushChat(user, msg);
-  res.json(shapeMessage(msg));
+  return shapeMessage(msg);
+}
+
+/** Send a chat message carrying a photo / audio / video / file (and optional caption). */
+app.post('/api/chat/media', chatMedia.single('media'), uploadToBlob, (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+  res.json(persistChatMessage(user, {
+    text: (req.body && req.body.text) || '',
+    media: req.file.filename, media_type: mediaKind(req.file.mimetype),
+    media_name: req.file.originalname || req.file.filename,
+    media_size: req.file.size || '',
+    reply_to: (req.body && req.body.reply_to) || '',
+  }));
+});
+
+/**
+ * Finish a direct-to-Blob chat upload. The browser PUT the file straight into
+ * Blob storage (see /api/uploads/client-token) and reports the URL here, so the
+ * request body stays tiny and Vercel's 4.5 MB function cap never applies.
+ */
+app.post('/api/chat/media-url', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  if (!blobStorage.configured()) return res.status(400).json({ error: 'Direct uploads are not supported here.' });
+  const { url, media_type, media_name, media_size, text, reply_to } = (req.body && typeof req.body === 'object') ? req.body : {};
+  if (!/^https:\/\//i.test(String(url || ''))) return res.status(400).json({ error: 'Invalid media URL.' });
+  const size = Number(media_size) || 0;
+  if (size > 30 * 1024 * 1024) return res.status(400).json({ error: 'That file is too big — the limit is 30 MB.' });
+  const kind = ['image', 'audio', 'video', 'file'].includes(media_type) ? media_type : 'file';
+  res.json(persistChatMessage(user, {
+    media: url, media_type: kind,
+    media_name: String(media_name || '').slice(0, 255),
+    media_size: size || '',
+    text: String(text || '').slice(0, 2000),
+    reply_to: String(reply_to || ''),
+  }));
+});
+
+/**
+ * Mint a scoped client token that lets the browser PUT this file directly into
+ * Vercel Blob. Only live when Blob storage is configured; elsewhere the client
+ * falls back to the classic server upload. Kind gates the size cap so the token
+ * can never carry more than the matching endpoint would.
+ */
+app.post('/api/uploads/client-token', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  if (!blobStorage.configured()) return res.status(501).json({ error: 'Blob storage is not configured.' });
+  const { kind, name, type, size } = (req.body && typeof req.body === 'object') ? req.body : {};
+  const caps = { chat: 30 * 1024 * 1024, photo: 8 * 1024 * 1024 };
+  const maxSize = caps[kind];
+  if (!maxSize) return res.status(400).json({ error: 'Unknown upload kind.' });
+  const fileName = String(name || '');
+  const mime = String(type || '').trim();
+  if (!fileName || !mime) return res.status(400).json({ error: 'Missing file name or type.' });
+  const fileSize = Number(size) || 0;
+  if (fileSize > maxSize) {
+    return res.status(400).json({ error: `That file is too big — the limit is ${Math.round(maxSize / 1024 / 1024)} MB.` });
+  }
+  const safe = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const pathname = `uploads/${Date.now()}_${safe}`;
+  blobStorage.clientToken(pathname, { contentType: mime, maxSizeBytes: maxSize })
+    .then((token) => res.json({ token, pathname }))
+    .catch((error) => {
+      console.error(error);
+      res.status(502).json({ error: `Could not start upload: ${error.message || 'unknown error'}` });
+    });
 });
 
 app.post('/api/photos', upload.single('photo'), uploadToBlob, (req, res) => {
@@ -768,6 +834,40 @@ app.post('/api/photos', upload.single('photo'), uploadToBlob, (req, res) => {
   appendCsv(file('photos'), photo, COLS.photos);
   pushPhoto(user, photo);
   res.json({ ...photo, url: blobStorage.configured() ? photo.filename : `/uploads/${photo.filename}` });
+});
+
+/** Same as /api/photos, but the image was already PUT to Blob by the browser. */
+app.post('/api/photos-url', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  if (!blobStorage.configured()) return res.status(400).json({ error: 'Direct uploads are not supported here.' });
+  const { url, caption } = (req.body && typeof req.body === 'object') ? req.body : {};
+  if (!/^https:\/\//i.test(String(url || ''))) return res.status(400).json({ error: 'Invalid image URL.' });
+  const rows = readCsv(file('photos'));
+  const photo = {
+    id: nextId(rows), member: user.name, filename: url,
+    caption: String(caption || '').slice(0, 500), timestamp: new Date().toISOString(),
+  };
+  appendCsv(file('photos'), photo, COLS.photos);
+  pushPhoto(user, photo);
+  res.json({ ...photo, url });
+});
+
+/** Same as /api/posts/photo, but the image was already PUT to Blob by the browser. */
+app.post('/api/posts/photo-url', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  const { url, text } = (req.body && typeof req.body === 'object') ? req.body : {};
+  if (!/^https:\/\//i.test(String(url || ''))) return res.status(400).json({ error: 'Invalid image URL.' });
+  if (!text && !url) return res.status(400).json({ error: 'Write something or add a photo.' });
+  const rows = readCsv(file('posts'));
+  const post = {
+    id: nextId(rows), member: user.name, text: String(text || '').slice(0, 2000),
+    image: url, timestamp: new Date().toISOString(),
+  };
+  appendCsv(file('posts'), post, COLS.posts);
+  pushPost(user, post);
+  res.json(post);
 });
 
 // Also allow attaching an uploaded image to a post in one call.

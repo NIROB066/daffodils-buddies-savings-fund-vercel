@@ -236,6 +236,8 @@ All endpoints are under `/api`. "Auth" means the `x-user` header must resolve to
 | POST | `/api/posts/photo` | ✓ | Create a post with an image (multipart) |
 | GET | `/api/photos` | — | Memories, newest first, skipping rows whose file is gone |
 | POST | `/api/photos` | ✓ | Upload a memory photo (multipart, images only, 8 MB) |
+| POST | `/api/photos-url` | ✓ | Save a memory photo that the browser already PUT into Blob (`{ url, caption }`) |
+| POST | `/api/uploads/client-token` | ✓ | Mint a scoped Blob client token for direct browser→Blob uploads (`{ kind: 'chat' \| 'photo', name, type, size }`) → `{ token, pathname }`. `501` when Blob storage is off (clients fall back to multipart). |
 
 ### Chat
 
@@ -245,6 +247,7 @@ All endpoints are under `/api`. "Auth" means the `x-user` header must resolve to
 | GET | `/api/chat/live` | optional | The poll endpoint — see below |
 | POST | `/api/chat` | ✓ | Send text; `{ text, reply_to }` |
 | POST | `/api/chat/media` | ✓ | Send an attachment + optional caption (multipart, 30 MB) |
+| POST | `/api/chat/media-url` | ✓ | Finish a direct-to-Blob chat send: `{ url, media_type, media_name, media_size, text, reply_to }` → shares `persistChatMessage()` with `/api/chat/media` |
 | PATCH | `/api/chat/:id` | ✓ | Edit **your own** message text; stamps `edited_at` |
 | DELETE | `/api/chat/:id` | ✓ | Delete your own message (admin: anyone's) → tombstone |
 | POST | `/api/chat/:id/react` | ✓ | Toggle one of the 8 allowed emoji |
