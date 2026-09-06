@@ -553,6 +553,22 @@ const Community = (function () {
         if (msg) el.closest('.media-wrap').outerHTML = fileCard(msg, "Can't play here — download it");
       });
     });
+
+    // Fix black video thumbnail: once metadata is loaded the browser can seek, so
+    // nudge the current time to 0.001 s which forces it to decode and paint the
+    // first real frame instead of showing a blank black poster.
+    box.querySelectorAll('video.chat-media').forEach((vid) => {
+      if (vid.dataset.thumbLoaded) return; // already handled, don't re-seek on re-renders
+      vid.dataset.thumbLoaded = '1';
+      const seekToFirstFrame = () => {
+        if (vid.readyState >= 1 && vid.currentTime === 0) vid.currentTime = 0.001;
+      };
+      if (vid.readyState >= 1) {
+        seekToFirstFrame(); // metadata already available (cached / fast connection)
+      } else {
+        vid.addEventListener('loadedmetadata', seekToFirstFrame, { once: true });
+      }
+    });
   }
 
   const atBottom = (box) => box.scrollHeight - box.scrollTop - box.clientHeight < 60;
