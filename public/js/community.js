@@ -27,21 +27,71 @@ const Community = (function () {
   // overhead included), so anything at/above 4 MB rides the direct-to-Blob path.
   const DIRECT_UPLOAD_MIN = 4 * 1024 * 1024;
 
-  // Vercel's serverless functions refuse request bodies over 4.5 MB, so any video
-  // clip bigger than that used to die with a vague error (multer never even ran).
-  // The browser SDK lets us PUT the bytes straight into Blob storage instead. It is
-  // loaded once, on demand, from a pinned CDN; if that ever fails we fall back to
-  // the classic server upload, which still handles anything under the function cap.
+  // @vercel/blob/client is loaded once on demand. It exports `upload()` which
+  // accepts a scoped JWT token (generated server-side by
+  // generateClientTokenFromReadWriteToken) and PUTs the bytes straight to Blob
+  // storage from the browser — the only way past Vercel's 4.5 MB function cap.
   const BLOB_CLIENT_URL = 'https://esm.sh/@vercel/blob@2.8.0/client?target=es2020&bundle';
   let blobClientPromise = null;
   function loadBlobClient() {
     if (!blobClientPromise) {
-      blobClientPromise = import(BLOB_CLIENT_URL).catch((error) => {
-        blobClientPromise = null; // transient blip? try again on the next send
-        throw error;
+      blobClientPromise = import(BLOB_CLIENT_URL).catch(() => {
+        blobClientPromise = null; // transient CDN blip — retry on next send
+        return null;
       });
     }
     return blobClientPromise;
+  }
+
+  /**
+   * Upload a file directly into Vercel Blob using the scoped client token
+   * minted by /api/uploads/client-token. Uses the `upload()` function from
+   * @vercel/blob/client (not `put()` — that's the server-side API).
+   * Falls back to a raw fetch PUT if the SDK fails to load from the CDN.
+   * Returns the public Blob URL on success.
+   */
+  async function directBlobPut(file, kind) {
+    const meta = await api('/uploads/client-token', {
+      method: 'POST',
+      body: {
+        kind,
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        size: file.size,
+      },
+    });
+
+    // Try the SDK first — it handles multipart, retries, and URL resolution.
+    const sdk = await loadBlobClient();
+    if (sdk && sdk.upload) {
+      const blob = await sdk.upload(meta.pathname, file, {
+        access: 'public',
+        token: meta.token,
+        contentType: file.type || 'application/octet-stream',
+      });
+      return blob.url;
+    }
+
+    // SDK unavailable (CDN blocked / offline) — raw fetch PUT as fallback.
+    // The client token JWT encodes the store; blob.vercel-storage.com resolves it.
+    const blobUrl = `https://blob.vercel-storage.com/${meta.pathname}`;
+    const res = await fetch(blobUrl, {
+      method: 'PUT',
+      headers: {
+        'authorization': `Bearer ${meta.token}`,
+        'content-type': file.type || 'application/octet-stream',
+        'x-content-type': file.type || 'application/octet-stream',
+        'x-api-version': '7',
+        'x-access': 'public',
+      },
+      body: file,
+    });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => res.statusText);
+      throw new Error(`Blob upload failed (${res.status}): ${msg}`);
+    }
+    const data = await res.json().catch(() => ({}));
+    return data.url || blobUrl;
   }
 
   /** The three bouncing dots reused everywhere a send is in flight. */
@@ -68,32 +118,20 @@ const Community = (function () {
       : /^video\//.test(file.type) ? 'video'
         : /^audio\//.test(file.type) ? 'audio' : 'file';
 
-    let sdk = null;
     if (file.size >= DIRECT_UPLOAD_MIN || kind === 'video') {
-      try { sdk = await loadBlobClient(); } catch { /* CDN unreachable → classic */ }
-      if (sdk && sdk.put) {
-        try {
-          const meta = await api('/uploads/client-token', {
-            method: 'POST',
-            body: { kind: 'chat', name: file.name, type: file.type || 'application/octet-stream', size: file.size },
-          });
-          const blob = await sdk.put(meta.pathname, file, {
-            access: 'public',
-            token: meta.token,
-            contentType: file.type || 'application/octet-stream',
-          });
-          return await api('/chat/media-url', {
-            method: 'POST',
-            body: {
-              url: blob.url, media_type: kind, media_name: file.name,
-              media_size: file.size, text, reply_to: replyTo || '',
-            },
-          });
-        } catch (error) {
-          // No Blob store on this backend → send it through the server as before.
-          if (error && error.status === 501) { /* fall through to classic */ }
-          else throw error;
-        }
+      try {
+        const url = await directBlobPut(file, 'chat');
+        return await api('/chat/media-url', {
+          method: 'POST',
+          body: {
+            url, media_type: kind, media_name: file.name,
+            media_size: file.size, text, reply_to: replyTo || '',
+          },
+        });
+      } catch (error) {
+        // 501 = Blob store not configured on this backend → fall through to classic.
+        if (error && error.status === 501) { /* fall through */ }
+        else throw error;
       }
     }
 
@@ -106,25 +144,13 @@ const Community = (function () {
 
   /** Memory photo upload — same direct-to-Blob strategy as chat media. */
   async function uploadMemoryPhoto(file, caption) {
-    let sdk = null;
     if (file.size >= DIRECT_UPLOAD_MIN) {
-      try { sdk = await loadBlobClient(); } catch { /* CDN unreachable → classic */ }
-      if (sdk && sdk.put) {
-        try {
-          const meta = await api('/uploads/client-token', {
-            method: 'POST',
-            body: { kind: 'photo', name: file.name, type: file.type || 'application/octet-stream', size: file.size },
-          });
-          const blob = await sdk.put(meta.pathname, file, {
-            access: 'public',
-            token: meta.token,
-            contentType: file.type || 'application/octet-stream',
-          });
-          return await api('/photos-url', { method: 'POST', body: { url: blob.url, caption } });
-        } catch (error) {
-          if (error && error.status === 501) { /* fall through to classic */ }
-          else throw error;
-        }
+      try {
+        const url = await directBlobPut(file, 'photo');
+        return await api('/photos-url', { method: 'POST', body: { url, caption } });
+      } catch (error) {
+        if (error && error.status === 501) { /* fall through to classic */ }
+        else throw error;
       }
     }
 
@@ -136,25 +162,13 @@ const Community = (function () {
 
   /** Post image upload — direct-to-Blob on Vercel, multipart elsewhere. */
   async function uploadPostImage(file, text) {
-    let sdk = null;
     if (file.size >= DIRECT_UPLOAD_MIN) {
-      try { sdk = await loadBlobClient(); } catch { /* CDN unreachable → classic */ }
-      if (sdk && sdk.put) {
-        try {
-          const meta = await api('/uploads/client-token', {
-            method: 'POST',
-            body: { kind: 'photo', name: file.name, type: file.type || 'application/octet-stream', size: file.size },
-          });
-          const blob = await sdk.put(meta.pathname, file, {
-            access: 'public',
-            token: meta.token,
-            contentType: file.type || 'application/octet-stream',
-          });
-          return await api('/posts/photo-url', { method: 'POST', body: { url: blob.url, text } });
-        } catch (error) {
-          if (error && error.status === 501) { /* fall through to classic */ }
-          else throw error;
-        }
+      try {
+        const url = await directBlobPut(file, 'photo');
+        return await api('/posts/photo-url', { method: 'POST', body: { url, text } });
+      } catch (error) {
+        if (error && error.status === 501) { /* fall through to classic */ }
+        else throw error;
       }
     }
 
