@@ -27,28 +27,17 @@ const Community = (function () {
   // overhead included), so anything at/above 4 MB rides the direct-to-Blob path.
   const DIRECT_UPLOAD_MIN = 4 * 1024 * 1024;
 
-  // @vercel/blob/client is loaded once on demand. It exports `upload()` which
-  // accepts a scoped JWT token (generated server-side by
-  // generateClientTokenFromReadWriteToken) and PUTs the bytes straight to Blob
-  // storage from the browser — the only way past Vercel's 4.5 MB function cap.
-  const BLOB_CLIENT_URL = 'https://esm.sh/@vercel/blob@2.8.0/client?target=es2020&bundle';
-  let blobClientPromise = null;
-  function loadBlobClient() {
-    if (!blobClientPromise) {
-      blobClientPromise = import(BLOB_CLIENT_URL).catch(() => {
-        blobClientPromise = null; // transient CDN blip — retry on next send
-        return null;
-      });
-    }
-    return blobClientPromise;
-  }
+  // Direct-to-Blob uploads are plain `fetch` PUTs rather than the @vercel/blob/client
+  // SDK. In current @vercel/blob releases (>= 2.7) the client `upload()` function no
+  // longer accepts a pre-minted `{ token, access }` pair — it demands a server-side
+  // `handleUploadUrl` and throws `client/'upload' requires the 'handleUploadUrl'
+  // parameter`, which is exactly what broke every video upload. The scoped token minted
+  // by /api/uploads/client-token authorises a direct PUT to blob.vercel-storage.com, so
+  // we use that classic wire format and skip the SDK (and its esm.sh CDN dependency).
 
   /**
    * Upload a file directly into Vercel Blob using the scoped client token
-   * minted by /api/uploads/client-token. Uses the `upload()` function from
-   * @vercel/blob/client (not `put()` — that's the server-side API).
-   * Falls back to a raw fetch PUT if the SDK fails to load from the CDN.
-   * Returns the public Blob URL on success.
+   * minted by /api/uploads/client-token. Returns the public Blob URL.
    */
   async function directBlobPut(file, kind) {
     const meta = await api('/uploads/client-token', {
@@ -61,28 +50,17 @@ const Community = (function () {
       },
     });
 
-    // Try the SDK first — it handles multipart, retries, and URL resolution.
-    const sdk = await loadBlobClient();
-    if (sdk && sdk.upload) {
-      const blob = await sdk.upload(meta.pathname, file, {
-        access: 'public',
-        token: meta.token,
-        contentType: file.type || 'application/octet-stream',
-      });
-      return blob.url;
-    }
-
-    // SDK unavailable (CDN blocked / offline) — raw fetch PUT as fallback.
-    // The client token JWT encodes the store; blob.vercel-storage.com resolves it.
-    const blobUrl = `https://blob.vercel-storage.com/${meta.pathname}`;
-    const res = await fetch(blobUrl, {
+    const contentType = file.type || 'application/octet-stream';
+    const res = await fetch(`https://blob.vercel-storage.com/${meta.pathname}`, {
       method: 'PUT',
       headers: {
         'authorization': `Bearer ${meta.token}`,
-        'content-type': file.type || 'application/octet-stream',
-        'x-content-type': file.type || 'application/octet-stream',
+        'content-type': contentType,
+        'x-content-type': contentType,
         'x-api-version': '7',
-        'x-access': 'public',
+        // Pathnames are unique per send (Date.now() prefix); keep exactly that — Blob
+        // should not append its own random suffix.
+        'x-add-random-suffix': '0',
       },
       body: file,
     });
@@ -91,7 +69,8 @@ const Community = (function () {
       throw new Error(`Blob upload failed (${res.status}): ${msg}`);
     }
     const data = await res.json().catch(() => ({}));
-    return data.url || blobUrl;
+    if (typeof data.url === 'string' && data.url) return data.url;
+    throw new Error('Blob upload completed but returned no URL.');
   }
 
   /** The three bouncing dots reused everywhere a send is in flight. */
