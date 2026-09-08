@@ -15,6 +15,11 @@ const Community = (function () {
   let hits = [], hitIdx = 0; // ids of matching messages + which one we're parked on
   const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉'];
   const SPEEDS = [1, 1.5, 2];
+  // Post engagement state (survives the posts-feed repaint).
+  let openPostComments = new Set();   // post ids whose comment section is expanded
+  let pickersOpen = new Set();        // post ids whose reaction picker is expanded
+  let commentReplyTo = {};            // post id → comment id being replied to (or '' for none)
+  let commentCache = {};              // post id → flat comment list (oldest first)
   const mediaUrl = (value) => /^https?:\/\//i.test(String(value || ''))
     ? value : `/uploads/${encodeURIComponent(value || '')}`;
   const myName = () => (Session.user && Session.user.name) || '';
@@ -228,18 +233,124 @@ const Community = (function () {
   }
 
   /* ---- posts ---- */
+
+  /** Reaction chips for a post (click to toggle) + an "add reaction" picker. */
+  function postReactionsHtml(p) {
+    const id = esc(p.id);
+    const chips = Object.entries(p.reactions || {}).map(([emoji, names]) => `
+      <button type="button" class="pr ${names.includes(myName()) ? 'mine' : ''}"
+              data-pr="${esc(emoji)}" data-post="${id}" title="${esc(names.join(', '))}">
+        ${esc(emoji)}<i>${names.length}</i>
+      </button>`).join('');
+    const picked = pickersOpen.has(String(p.id));
+    return `<span class="p-reacts" data-post="${id}">${chips}
+      <button type="button" class="pr-add" data-post="${id}" title="Add reaction" aria-expanded="${picked}">✚</button>
+      ${picked ? `<span class="pr-picker">${REACTIONS.map((e) =>
+        `<button type="button" class="pr-opt" data-pr="${esc(e)}" data-post="${id}">${esc(e)}</button>`).join('')}</span>` : ''}
+    </span>`;
+  }
+
+  /** The "💬 N" toggle that opens/closes a post's comment section. */
+  function postCommentsBtn(p) {
+    const n = Number(p.comment_count) || 0;
+    const open = openPostComments.has(String(p.id));
+    return `<button type="button" class="p-comments" data-post="${esc(p.id)}"
+        aria-expanded="${open}" title="${n ? (n === 1 ? '1 comment' : `${n} comments`) : 'Comment'}">
+      <span class="cc-ico">${ICON.message}</span><span class="cc-num">${n}</span>
+    </button>`;
+  }
+
+  function postFooter(p) {
+    return `<div class="post-actions">
+      ${postReactionsHtml(p)}
+      ${postCommentsBtn(p)}
+    </div>`;
+  }
+
+  /** Build the nested comment tree (replies under parents) from a flat list. */
+  function commentTree(list) {
+    const byId = Object.fromEntries(list.map((c) => [String(c.id), { ...c, children: [] }]));
+    const roots = [];
+    for (const c of list) {
+      const node = byId[String(c.id)];
+      const parent = byId[String(c.parent_id)];
+      if (parent && String(parent.post_id) === String(c.post_id)) parent.children.push(node);
+      else roots.push(node);
+    }
+    return roots;
+  }
+
+  function commentNodeHtml(node, postId) {
+    const replyBox = String(commentReplyTo[postId] || '') === String(node.id)
+      ? commentComposerHtml(postId, node.id, 'Replying…', 'Reply')
+      : '';
+    return `<div class="pc-item">
+      <div class="pc-head">
+        <span class="avatar-sm" style="background:${avatarColor(node.member)}">${initials(node.member)}</span>
+        <b>${esc(node.member)}</b><span class="pc-when">${fmtTime(node.timestamp)}</span>
+      </div>
+      <div class="pc-text">${linkMentions(linkUrls(esc(node.text)))}</div>
+      <div class="pc-actions">
+        <button type="button" class="pc-reply" data-post="${esc(postId)}" data-cid="${esc(node.id)}">Reply</button>
+        ${replyBox}
+      </div>
+      ${node.children.length ? `<div class="pc-children">${node.children.map((c) => commentNodeHtml(c, postId)).join('')}</div>` : ''}
+    </div>`;
+  }
+
+  function commentComposerHtml(postId, parentId, placeholder, label) {
+    return `<div class="pc-composer" data-post="${esc(postId)}" data-parent="${esc(parentId || '')}">
+      <input type="text" class="pc-input" maxlength="1000" placeholder="${esc(placeholder)}"
+             aria-label="${esc(placeholder)}" />
+      <button type="button" class="pc-send">${esc(label)}</button>
+    </div>`;
+  }
+
+  function postCommentsHtml(p) {
+    const id = String(p.id);
+    if (!openPostComments.has(id)) return '';
+    const list = commentCache[id] || [];
+    const tree = commentTree(list);
+    const body = tree.length
+      ? tree.map((c) => commentNodeHtml(c, id)).join('')
+      : '<div class="pc-empty">No comments yet — be the first! 💬</div>';
+    return `<div class="post-comments" data-post="${esc(p.id)}">
+      <div class="pc-tree">${body}</div>
+      ${commentComposerHtml(id, '', 'Add a comment…', 'Comment')}
+    </div>`;
+  }
+
+  /** Preserve in-progress comment text across a repaint, losing nothing while typing. */
+  function snapshotComposers() {
+    const snap = new Map();
+    for (const box of document.querySelectorAll('.pc-composer')) {
+      snap.set(`${box.dataset.post}#${box.dataset.parent}`, box.querySelector('.pc-input').value);
+    }
+    return snap;
+  }
+  function restoreComposers(snap) {
+    for (const box of document.querySelectorAll('.pc-composer')) {
+      const key = `${box.dataset.post}#${box.dataset.parent}`;
+      if (snap.has(key)) box.querySelector('.pc-input').value = snap.get(key);
+    }
+  }
+
   function renderPosts() {
     const el = document.getElementById('posts-feed');
     if (!posts.length) { el.innerHTML = '<div class="empty">No posts yet — say hello! 👋</div>'; return; }
+    const snap = snapshotComposers();
     el.innerHTML = posts.map((p) => `
-      <div class="feed-post">
+      <div class="feed-post" data-id="${esc(p.id)}">
         <div class="ph">
           <span class="avatar-sm" style="background:${avatarColor(p.member)}">${initials(p.member)}</span>
           <div><div class="who">${esc(p.member)}</div><div class="when">${fmtTime(p.timestamp)}</div></div>
         </div>
         ${p.text ? `<div class="body">${linkMentions(linkUrls(esc(p.text)))}</div>` : ''}
         ${p.image ? `<img src="${esc(p.image)}" alt="post image" loading="lazy" />` : ''}
+        ${postFooter(p)}
+        ${postCommentsHtml(p)}
       </div>`).join('');
+    restoreComposers(snap);
   }
 
   /* ---- media helpers ---- */
@@ -943,6 +1054,7 @@ const Community = (function () {
     }
 
     bindEmoji();
+    bindPostsFeed();
     bindChatBox();
     bindSearch();
     bindMenu();
@@ -1237,6 +1349,94 @@ const Community = (function () {
     finally { setButtonLoading(btn, null); }
   }
 
+  /* ---- post engagement: reactions + nested comments ---- */
+
+  async function togglePostReact(postId, emoji) {
+    try {
+      const p = await api(`/posts/${encodeURIComponent(postId)}/react`, { method: 'POST', body: { emoji } });
+      const at = posts.findIndex((x) => String(x.id) === String(postId));
+      if (at !== -1) {
+        p.comment_count = posts[at].comment_count || 0; // the react response has no count
+        posts[at] = p;
+      }
+      pickersOpen.delete(String(postId));
+      renderPosts();
+    } catch (e) { Toast.show(e.message, true); }
+  }
+
+  function togglePostPicker(postId) {
+    const key = String(postId);
+    if (pickersOpen.has(key)) pickersOpen.delete(key);
+    else pickersOpen.add(key);
+    renderPosts();
+  }
+
+  async function loadComments(postId) {
+    const key = String(postId);
+    try {
+      commentCache[key] = await api(`/posts/${encodeURIComponent(postId)}/comments`);
+    } catch {
+      // Keep whatever we had; a transient failure shouldn't collapse an open section.
+    }
+  }
+
+  /** Open/close a post's comment section, loading the tree the first time it opens. */
+  async function toggleComments(postId) {
+    const key = String(postId);
+    if (openPostComments.has(key)) {
+      openPostComments.delete(key);
+      delete commentReplyTo[key];
+    } else {
+      openPostComments.add(key);
+      await loadComments(postId);
+    }
+    renderPosts();
+  }
+
+  function toggleReplyBox(postId, cid) {
+    const key = String(postId);
+    // Clicking the same comment's Reply again collapses it; any other opens on that comment.
+    if (commentReplyTo[key] === String(cid)) delete commentReplyTo[key];
+    else commentReplyTo[key] = String(cid);
+    renderPosts();
+  }
+
+  /** POST a comment/reply, then refetch so the new row (and its nesting) appears. */
+  async function submitComment(composer) {
+    const postId = composer.dataset.post;
+    const parentId = composer.dataset.parent || '';
+    const input = composer.querySelector('.pc-input');
+    const text = (input.value || '').trim();
+    if (!text) return Toast.show('Write a comment first.', true);
+    try {
+      await api(`/posts/${encodeURIComponent(postId)}/comments`, { method: 'POST', body: { text, parent_id: parentId } });
+      const p = posts.find((x) => String(x.id) === String(postId));
+      if (p) p.comment_count = (Number(p.comment_count) || 0) + 1;
+      delete commentReplyTo[String(postId)];
+      await loadComments(postId);
+      renderPosts();
+    } catch (e) { Toast.show(e.message, true); }
+  }
+
+  /** One delegated listener for reactions, the comment toggle, replies and composers. */
+  function bindPostsFeed() {
+    const feed = document.getElementById('posts-feed');
+    feed.addEventListener('click', (e) => {
+      const opt = e.target.closest('[data-pr]');
+      if (opt) return togglePostReact(opt.dataset.post, opt.dataset.pr);
+      const add = e.target.closest('.pr-add');
+      if (add) return togglePostPicker(add.dataset.post);
+      const cc = e.target.closest('.p-comments');
+      if (cc) return toggleComments(cc.dataset.post);
+      const replyBtn = e.target.closest('.pc-reply');
+      if (replyBtn) return toggleReplyBox(replyBtn.dataset.post, replyBtn.dataset.cid);
+      if (e.target.closest('.pc-send')) {
+        const composer = e.target.closest('.pc-composer');
+        if (composer) return submitComment(composer);
+      }
+    });
+  }
+
   async function sendChat() {
     const ta = document.getElementById('chat-text');
     const text = ta.value.trim();
@@ -1336,6 +1536,8 @@ const Community = (function () {
   async function reloadPosts() {
     try {
       posts = await api('/posts');
+      // Any comment section that's open right now should pick up others' new comments.
+      await Promise.all([...openPostComments].map(loadComments));
       renderPosts();
     } catch {}
   }

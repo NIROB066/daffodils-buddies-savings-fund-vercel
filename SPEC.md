@@ -115,7 +115,8 @@ existing rows gain an empty value and the header is updated.
 | `investments.csv` | `id, member, amount, date` |
 | `loans.csv` | `id, member, amount, date, purpose, status, due_date` |
 | `donations.csv` | `id, organization, amount, date, link, type` |
-| `posts.csv` | `id, member, text, image, timestamp` |
+| `posts.csv` | `id, member, text, image, timestamp, reactions` — `reactions` packs emoji → who reacted as `👍:Nirob|Yen` (one CSV cell) |
+| `post_comments.csv` | `id, post_id, parent_id, member, text, timestamp` — `parent_id=''` is a top-level comment, otherwise a nested reply |
 | `chat.csv` | `id, member, text, media, media_type, media_name, media_size, reply_to, timestamp, reactions, deleted, edited_at` |
 | `chat_state.csv` | `email, name, last_seen, updated` — read receipts, created at runtime |
 | `photos.csv` | `id, member, filename, caption, timestamp` |
@@ -231,9 +232,12 @@ All endpoints are under `/api`. "Auth" means the `x-user` header must resolve to
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/posts` | — | Posts, newest first |
+| GET | `/api/posts` | — | Posts, newest first — each row carries parsed `reactions` and a `comment_count` |
 | POST | `/api/posts` | ✓ | Create a post |
 | POST | `/api/posts/photo` | ✓ | Create a post with an image (multipart) |
+| POST | `/api/posts/:id/react` | ✓ | Toggle your reaction on a post (one emoji per person, like chat) |
+| GET | `/api/posts/:id/comments` | — | A post's comments as a flat list (client builds the nested tree from `parent_id`) |
+| POST | `/api/posts/:id/comments` | ✓ | Add a comment — `{ text, parent_id? }`; omit/null `parent_id` for a top-level comment, or give an existing comment's id for a nested reply |
 | GET | `/api/photos` | — | Memories, newest first, skipping rows whose file is gone |
 | POST | `/api/photos` | ✓ | Upload a memory photo (multipart, images only, 8 MB) |
 | POST | `/api/photos-url` | ✓ | Save a memory photo that the browser already PUT into Blob (`{ url, caption }`) |
@@ -292,7 +296,7 @@ cost a write per keystroke and buy nothing. Read receipts *are* persisted
 | --- | --- | --- |
 | POST | `/api/admin/investment` \| `/loan` \| `/donation` | Add a ledger row |
 | DELETE | `/api/admin/investment/:id` \| `/loan/:id` \| `/donation/:id` | Delete a ledger row |
-| DELETE | `/api/admin/chat` \| `/posts` \| `/photos` | Clear a collection and its media (chat also resets read markers) |
+| DELETE | `/api/admin/chat` \| `/posts` \| `/photos` | Clear a collection and its media (chat also resets read markers; clearing posts also drops their comments) |
 | POST | `/api/admin/rule-override` | Set, or clear with an empty value, a rule winner |
 | GET | `/api/admin/members` | Members with password status and reset requests |
 | POST | `/api/admin/member-email` | Change a member's login email |

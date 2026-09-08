@@ -64,7 +64,11 @@ const COLS = {
   investments: ['id', 'member', 'amount', 'date'],
   loans: ['id', 'member', 'amount', 'date', 'purpose', 'status', 'due_date'],
   donations: ['id', 'organization', 'amount', 'date', 'link', 'type'],
-  posts: ['id', 'member', 'text', 'image', 'timestamp'],
+  // `reactions` packs emoji → who reacted as "👍:Nirob|Yen;❤️:Riyad" (one CSV cell), the
+  // same encoding chat uses. A comment is a row in `post_comments`; `parent_id` nests
+  // replies under a comment ('' for a top-level comment on the post).
+  posts: ['id', 'member', 'text', 'image', 'timestamp', 'reactions'],
+  post_comments: ['id', 'post_id', 'parent_id', 'member', 'text', 'timestamp'],
   // `reactions` packs emoji → who reacted as "👍:Nirob|Yen;❤️:Riyad" (one CSV cell).
   // `deleted` is a tombstone: the row stays so replies still make sense, the content goes.
   chat: ['id', 'member', 'text', 'media', 'media_type', 'media_name', 'media_size', 'reply_to',
@@ -108,9 +112,20 @@ function migrateChat() {
   writeCsv(file('chat'), rows, COLS.chat);
 }
 
+// Posts gain a `reactions` column (same reason as migrateChat — widening the header keeps
+// appendCsv and the Google Sheets tab aligned with the current COLS).
+let postsMigrated = false;
+function migratePosts() {
+  if (postsMigrated) return;
+  postsMigrated = true;
+  const rows = readCsv(file('posts'));
+  if (!rows.length || 'reactions' in rows[0]) return;
+  writeCsv(file('posts'), rows, COLS.posts);
+}
+
 const storageReady = googleStorage.configured()
-  ? () => initGoogleStorage(COLS).then(migrateChat)
-  : (() => { const done = Promise.resolve(migrateChat()); return () => done; })();
+  ? () => initGoogleStorage(COLS).then(() => { migrateChat(); migratePosts(); })
+  : (() => { const done = Promise.resolve(migrateChat()).then(migratePosts); return () => done; })();
 
 /**
  * Background work started by a handler — a Sheets write, a push. A serverless instance is
@@ -350,8 +365,15 @@ app.get('/api/people', (_req, res) =>
   res.json(readCsv(file('login')).map((u) => u.name).filter(Boolean)));
 
 // ---- community routes ---------------------------------------------------
-app.get('/api/posts', (_req, res) =>
-  res.json(readCsv(file('posts')).sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))));
+app.get('/api/posts', (_req, res) => {
+  const countByPost = {};
+  for (const c of readCsv(file('post_comments'))) {
+    countByPost[String(c.post_id)] = (countByPost[String(c.post_id)] || 0) + 1;
+  }
+  res.json(readCsv(file('posts'))
+    .map((p) => ({ ...p, reactions: parseReactions(p.reactions), comment_count: countByPost[String(p.id)] || 0 }))
+    .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || '')));
+});
 
 app.post('/api/posts', (req, res) => {
   const user = currentUser(req);
@@ -361,11 +383,62 @@ app.post('/api/posts', (req, res) => {
   const rows = readCsv(file('posts'));
   const post = {
     id: nextId(rows), member: user.name, text: text || '',
-    image: image || '', timestamp: new Date().toISOString(),
+    image: image || '', timestamp: new Date().toISOString(), reactions: '',
   };
   appendCsv(file('posts'), post, COLS.posts);
   pushPost(user, post);
-  res.json(post);
+  res.json({ ...post, reactions: {}, comment_count: 0 });
+});
+
+// One emoji per person per post: sending the same one again takes it back.
+app.post('/api/posts/:id/react', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  const emoji = String((req.body || {}).emoji || '');
+  if (!REACTIONS.includes(emoji)) return res.status(400).json({ error: 'Unknown reaction.' });
+  const rows = readCsv(file('posts'));
+  const post = rows.find((r) => String(r.id) === String(req.params.id));
+  if (!post) return res.status(404).json({ error: 'Post not found.' });
+  const map = parseReactions(post.reactions);
+  const had = (map[emoji] || []).includes(user.name);
+  for (const key of Object.keys(map)) map[key] = map[key].filter((n) => n !== user.name);
+  if (!had) map[emoji] = [...(map[emoji] || []), user.name];
+  post.reactions = encodeReactions(map);
+  writeCsv(file('posts'), rows, COLS.posts);
+  res.json({ ...post, reactions: parseReactions(post.reactions) });
+});
+
+// A post's comments, oldest first — the client builds the nested tree from parent_id.
+app.get('/api/posts/:id/comments', (req, res) => {
+  const id = String(req.params.id);
+  res.json(readCsv(file('post_comments'))
+    .filter((c) => String(c.post_id) === id)
+    .sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || '')));
+});
+
+// Add a comment or, when parent_id is given, a nested reply to a comment on this post.
+app.post('/api/posts/:id/comments', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in.' });
+  const id = String(req.params.id);
+  if (!readCsv(file('posts')).some((p) => String(p.id) === id)) {
+    return res.status(404).json({ error: 'Post not found.' });
+  }
+  const text = String((req.body || {}).text || '').trim().slice(0, 1000);
+  if (!text) return res.status(400).json({ error: 'Write a comment first.' });
+  const parentId = String((req.body || {}).parent_id || '');
+  if (parentId) {
+    const exists = readCsv(file('post_comments'))
+      .some((c) => String(c.id) === parentId && String(c.post_id) === id);
+    if (!exists) return res.status(400).json({ error: 'Parent comment not found.' });
+  }
+  const comments = readCsv(file('post_comments'));
+  const comment = {
+    id: nextId(comments), post_id: id, parent_id: parentId,
+    member: user.name, text, timestamp: new Date().toISOString(),
+  };
+  appendCsv(file('post_comments'), comment, COLS.post_comments);
+  res.json(comment);
 });
 
 /* ---- chat message shaping ------------------------------------------------
@@ -479,9 +552,19 @@ app.post('/api/chat/seen', (req, res) => {
 });
 
 function postsRevision() {
-  const posts = readCsv(file('posts'));
-  const last = posts[posts.length - 1];
-  return `${posts.length}:${last ? last.id : '0'}`;
+  // Reactions mutate a post in place and comments live in a separate table, so a simple
+  // count+lastId (as chat's old rows did) would miss both. Hash the mutable + comment
+  // fields instead — new posts, edited reactions and new comments all change the result.
+  let hash = 0;
+  for (const r of readCsv(file('posts'))) {
+    const s = `${r.id}~${r.reactions || ''}`;
+    for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) | 0;
+  }
+  for (const c of readCsv(file('post_comments'))) {
+    const s = `${c.post_id}~${c.parent_id}~${c.member}~${c.text}`;
+    for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) | 0;
+  }
+  return String(hash >>> 0);
 }
 
 /**
@@ -863,11 +946,11 @@ app.post('/api/posts/photo-url', (req, res) => {
   const rows = readCsv(file('posts'));
   const post = {
     id: nextId(rows), member: user.name, text: String(text || '').slice(0, 2000),
-    image: url, timestamp: new Date().toISOString(),
+    image: url, timestamp: new Date().toISOString(), reactions: '',
   };
   appendCsv(file('posts'), post, COLS.posts);
   pushPost(user, post);
-  res.json(post);
+  res.json({ ...post, reactions: {}, comment_count: 0 });
 });
 
 // Also allow attaching an uploaded image to a post in one call.
@@ -878,11 +961,11 @@ app.post('/api/posts/photo', upload.single('photo'), uploadToBlob, (req, res) =>
   const post = {
     id: nextId(rows), member: user.name, text: (req.body && req.body.text) || '',
     image: req.file ? (blobStorage.configured() ? req.file.filename : `/uploads/${req.file.filename}`) : '',
-    timestamp: new Date().toISOString(),
+    timestamp: new Date().toISOString(), reactions: '',
   };
   appendCsv(file('posts'), post, COLS.posts);
   pushPost(user, post);
-  res.json(post);
+  res.json({ ...post, reactions: {}, comment_count: 0 });
 });
 
 // ---- admin routes -------------------------------------------------------
@@ -961,7 +1044,11 @@ app.delete('/api/admin/chat', requireAdmin, (req, res, next) => {
   typingNow.clear();
   next();
 }, clearCollection('chat', COLS.chat, (r) => r.media));
-app.delete('/api/admin/posts', requireAdmin, clearCollection('posts', COLS.posts, (r) => r.image));
+app.delete('/api/admin/posts', requireAdmin, (req, res, next) => {
+  // Clearing the feed must not strand orphaned comments pointing at gone posts.
+  writeCsv(file('post_comments'), [], COLS.post_comments);
+  next();
+}, clearCollection('posts', COLS.posts, (r) => r.image));
 app.delete('/api/admin/photos', requireAdmin, clearCollection('photos', COLS.photos, (r) => r.filename));
 
 /** Set (or clear) the admin-decided winner for a rule. Empty value removes the override. */
