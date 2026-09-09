@@ -254,10 +254,8 @@ const Community = (function () {
   function postCommentsBtn(p) {
     const key = String(p.id);
     const open = openPostComments.has(key);
-    // While the section is expanded, the number we show must match the comments actually
-    // rendered (local cache), not a count from a potentially-stale posts fetch.
-    let n = Number(p.comment_count) || 0;
-    if (open && Array.isArray(commentCache[key])) n = commentCache[key].length;
+    // Use the local cache count if available, otherwise server comment_count.
+    let n = Array.isArray(commentCache[key]) ? commentCache[key].length : (Number(p.comment_count) || 0);
     return `<button type="button" class="p-comments" data-post="${esc(p.id)}"
         aria-expanded="${open}" title="${n ? (n === 1 ? '1 comment' : `${n} comments`) : 'Comment'}">
       <span class="cc-ico">${ICON.message}</span><span class="cc-num">${n}</span>
@@ -277,7 +275,7 @@ const Community = (function () {
     const roots = [];
     for (const c of list) {
       const node = byId[String(c.id)];
-      const parent = byId[String(c.parent_id)];
+      const parent = (c.parent_id && String(c.parent_id) !== String(c.id)) ? byId[String(c.parent_id)] : null;
       if (parent && String(parent.post_id) === String(c.post_id)) parent.children.push(node);
       else roots.push(node);
     }
@@ -313,11 +311,17 @@ const Community = (function () {
   function postCommentsHtml(p) {
     const id = String(p.id);
     if (!openPostComments.has(id)) return '';
+    const isLoading = !Array.isArray(commentCache[id]);
     const list = commentCache[id] || [];
     const tree = commentTree(list);
-    const body = tree.length
-      ? tree.map((c) => commentNodeHtml(c, id)).join('')
-      : '<div class="pc-empty">No comments yet — be the first! 💬</div>';
+    let body = '';
+    if (isLoading) {
+      body = '<div class="pc-empty pc-loading">Loading comments…</div>';
+    } else if (tree.length) {
+      body = tree.map((c) => commentNodeHtml(c, id)).join('');
+    } else {
+      body = '<div class="pc-empty">No comments yet — be the first! 💬</div>';
+    }
     return `<div class="post-comments" data-post="${esc(p.id)}">
       <div class="pc-tree">${body}</div>
       ${commentComposerHtml(id, '', 'Add a comment…', 'Comment')}
@@ -1401,19 +1405,30 @@ const Community = (function () {
     if (openPostComments.has(key)) {
       openPostComments.delete(key);
       delete commentReplyTo[key];
+      renderPosts();
     } else {
       openPostComments.add(key);
+      renderPosts(); // Show open section and loading state immediately
       await loadComments(postId);
+      const p = posts.find((x) => String(x.id) === key);
+      if (p && Array.isArray(commentCache[key])) p.comment_count = commentCache[key].length;
+      renderPosts();
     }
-    renderPosts();
   }
 
   function toggleReplyBox(postId, cid) {
     const key = String(postId);
     // Clicking the same comment's Reply again collapses it; any other opens on that comment.
-    if (commentReplyTo[key] === String(cid)) delete commentReplyTo[key];
-    else commentReplyTo[key] = String(cid);
+    if (commentReplyTo[key] === String(cid)) {
+      delete commentReplyTo[key];
+    } else {
+      commentReplyTo[key] = String(cid);
+    }
     renderPosts();
+    if (commentReplyTo[key]) {
+      const input = document.querySelector(`.pc-composer[data-post="${postId}"][data-parent="${cid}"] .pc-input`);
+      if (input) input.focus();
+    }
   }
 
   /** POST a comment/reply, then refetch so the new row (and its nesting) appears. */
@@ -1421,19 +1436,50 @@ const Community = (function () {
     const postId = composer.dataset.post;
     const parentId = composer.dataset.parent || '';
     const input = composer.querySelector('.pc-input');
+    const sendBtn = composer.querySelector('.pc-send');
     const text = (input.value || '').trim();
     if (!text) return Toast.show('Write a comment first.', true);
+
+    if (sendBtn) {
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Posting…';
+    }
     try {
-      const created = await api(`/posts/${encodeURIComponent(postId)}/comments`, { method: 'POST', body: { text, parent_id: parentId } });
+      const created = await api(`/posts/${encodeURIComponent(postId)}/comments`, {
+        method: 'POST',
+        body: { text, parent_id: parentId },
+      });
       const key = String(postId);
       const p = posts.find((x) => String(x.id) === String(postId));
-      if (p) p.comment_count = (Number(p.comment_count) || 0) + 1;
+
+      // CRITICAL: Clear input before renderPosts so snapshotComposers won't capture it!
+      input.value = '';
+
+      // Close the reply composer if this was a reply
       delete commentReplyTo[key];
-      // Add the server-created comment straight into the cache rather than reopening the
-      // section / re-fetching. A follow-up poll from a stale instance must never hide it.
+
+      // Ensure comments section stays open to view newly posted comment
+      openPostComments.add(key);
+
+      // Merge into local cache immediately
       commentCache[key] = mergeComments(commentCache[key] || [], [created]);
+      if (p) p.comment_count = commentCache[key].length;
+
       renderPosts();
-    } catch (e) { Toast.show(e.message, true); }
+
+      // Background refresh to guarantee sync with server instance
+      loadComments(postId).then(() => {
+        if (p && Array.isArray(commentCache[key])) p.comment_count = commentCache[key].length;
+        renderPosts();
+      });
+    } catch (e) {
+      Toast.show(e.message, true);
+    } finally {
+      if (sendBtn) {
+        sendBtn.disabled = false;
+        sendBtn.textContent = parentId ? 'Reply' : 'Comment';
+      }
+    }
   }
 
   /** One delegated listener for reactions, the comment toggle, replies and composers. */
@@ -1449,6 +1495,13 @@ const Community = (function () {
       const replyBtn = e.target.closest('.pc-reply');
       if (replyBtn) return toggleReplyBox(replyBtn.dataset.post, replyBtn.dataset.cid);
       if (e.target.closest('.pc-send')) {
+        const composer = e.target.closest('.pc-composer');
+        if (composer) return submitComment(composer);
+      }
+    });
+    feed.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.matches('.pc-input')) {
+        e.preventDefault();
         const composer = e.target.closest('.pc-composer');
         if (composer) return submitComment(composer);
       }

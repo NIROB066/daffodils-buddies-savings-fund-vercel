@@ -123,9 +123,19 @@ function migratePosts() {
   writeCsv(file('posts'), rows, COLS.posts);
 }
 
+let postCommentsMigrated = false;
+function migratePostComments() {
+  if (postCommentsMigrated) return;
+  postCommentsMigrated = true;
+  const p = file('post_comments');
+  if (!googleStorage.configured() && !fs.existsSync(p)) {
+    writeCsv(p, [], COLS.post_comments);
+  }
+}
+
 const storageReady = googleStorage.configured()
-  ? () => initGoogleStorage(COLS).then(() => { migrateChat(); migratePosts(); })
-  : (() => { const done = Promise.resolve(migrateChat()).then(migratePosts); return () => done; })();
+  ? () => initGoogleStorage(COLS).then(() => { migrateChat(); migratePosts(); migratePostComments(); })
+  : (() => { const done = Promise.resolve(migrateChat()).then(migratePosts).then(migratePostComments); return () => done; })();
 
 /**
  * Background work started by a handler — a Sheets write, a push. A serverless instance is
@@ -434,7 +444,7 @@ app.post('/api/posts/:id/comments', (req, res) => {
   }
   const comments = readCsv(file('post_comments'));
   const comment = {
-    id: nextId(comments), post_id: id, parent_id: parentId,
+    id: String(nextId(comments)), post_id: id, parent_id: parentId,
     member: user.name, text, timestamp: new Date().toISOString(),
   };
   appendCsv(file('post_comments'), comment, COLS.post_comments);
