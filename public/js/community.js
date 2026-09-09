@@ -252,8 +252,12 @@ const Community = (function () {
 
   /** The "💬 N" toggle that opens/closes a post's comment section. */
   function postCommentsBtn(p) {
-    const n = Number(p.comment_count) || 0;
-    const open = openPostComments.has(String(p.id));
+    const key = String(p.id);
+    const open = openPostComments.has(key);
+    // While the section is expanded, the number we show must match the comments actually
+    // rendered (local cache), not a count from a potentially-stale posts fetch.
+    let n = Number(p.comment_count) || 0;
+    if (open && Array.isArray(commentCache[key])) n = commentCache[key].length;
     return `<button type="button" class="p-comments" data-post="${esc(p.id)}"
         aria-expanded="${open}" title="${n ? (n === 1 ? '1 comment' : `${n} comments`) : 'Comment'}">
       <span class="cc-ico">${ICON.message}</span><span class="cc-num">${n}</span>
@@ -1374,10 +1378,21 @@ const Community = (function () {
   async function loadComments(postId) {
     const key = String(postId);
     try {
-      commentCache[key] = await api(`/posts/${encodeURIComponent(postId)}/comments`);
+      const fresh = await api(`/posts/${encodeURIComponent(postId)}/comments`);
+      // Merge instead of replace: on Vercel a refetch can be served by a second serverless
+      // instance whose Sheets cache predates the write, so it would come back without the
+      // comment we just posted and wipe it from view. A union by id never loses one we already have.
+      commentCache[key] = mergeComments(commentCache[key] || [], fresh || []);
     } catch {
       // Keep whatever we had; a transient failure shouldn't collapse an open section.
     }
+  }
+
+  /** Union two comment lists by id, oldest first — newer wins on conflicting fields. */
+  function mergeComments(existing, fresh) {
+    const byId = new Map();
+    for (const c of [...fresh, ...existing]) byId.set(String(c.id), c);
+    return [...byId.values()].sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
   }
 
   /** Open/close a post's comment section, loading the tree the first time it opens. */
@@ -1409,11 +1424,14 @@ const Community = (function () {
     const text = (input.value || '').trim();
     if (!text) return Toast.show('Write a comment first.', true);
     try {
-      await api(`/posts/${encodeURIComponent(postId)}/comments`, { method: 'POST', body: { text, parent_id: parentId } });
+      const created = await api(`/posts/${encodeURIComponent(postId)}/comments`, { method: 'POST', body: { text, parent_id: parentId } });
+      const key = String(postId);
       const p = posts.find((x) => String(x.id) === String(postId));
       if (p) p.comment_count = (Number(p.comment_count) || 0) + 1;
-      delete commentReplyTo[String(postId)];
-      await loadComments(postId);
+      delete commentReplyTo[key];
+      // Add the server-created comment straight into the cache rather than reopening the
+      // section / re-fetching. A follow-up poll from a stale instance must never hide it.
+      commentCache[key] = mergeComments(commentCache[key] || [], [created]);
       renderPosts();
     } catch (e) { Toast.show(e.message, true); }
   }
